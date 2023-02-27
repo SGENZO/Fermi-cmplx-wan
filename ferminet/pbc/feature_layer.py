@@ -20,9 +20,10 @@ with Fermionic Neural Networks. arXiv preprint arXiv:2202.05183.
 """
 
 from typing import Optional, Tuple
-
-from ferminet import networks
 import jax.numpy as jnp
+
+from ferminet import networks, dp
+from ferminet.pbc import ds
 
 
 def make_pbc_feature_layer(charges: Optional[jnp.ndarray] = None,
@@ -91,3 +92,115 @@ def make_pbc_feature_layer(charges: Optional[jnp.ndarray] = None,
     return ae_features, ee_features
 
   return networks.FeatureLayer(init=init, apply=apply)
+
+
+def make_ferminet_decaying_features(
+    charges: Optional[jnp.ndarray] = None,
+    nspins: Optional[Tuple[int, ...]] = None,
+    ndim: int = 3,
+    rc : float = 3.0,
+    rc_smth : float = 0.5,
+    lr : Optional[bool] = False,
+    lattice : Optional[jnp.ndarray] = None,
+) -> networks.FeatureLayer:
+  """Returns the init and apply functions for the decaying features."""
+
+  if lr:
+    pbc_feat = make_pbc_feature_layer(
+      charges, nspins, ndim, 
+      lattice=lattice, 
+      include_r_ae=True,
+    )
+
+  def init() -> Tuple[Tuple[int, int], networks.Param]:
+    if lr:
+      return (pbc_feat.init()[0][0] + ndim + 1, pbc_feat.init()[0][1] + ndim + 1), {}
+    else:
+      return (ndim + 1, ndim + 1), {}
+
+  def make_pref(rr):
+    """
+              sw(r)
+    pref = -----------
+             (r+1)^2
+    """
+    sw = dp.switch_func_poly(rr, rc, rc_smth)
+    return sw / ((rr+1.0) * (rr+1.0))
+
+  def apply(ae, r_ae, ee, r_ee) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    ae_pref = make_pref(r_ae)
+    ee_pref = make_pref(r_ee)
+    ae_features = jnp.concatenate((r_ae, ae), axis=2)
+    ee_features = jnp.concatenate((r_ee, ee), axis=2)
+    ae_features = ae_pref * ae_features
+    ee_features = ee_pref * ee_features
+    ae_features = jnp.reshape(ae_features, [jnp.shape(ae_features)[0], -1])
+    if lr:
+      ae_pbc_feat, ee_pbc_feat = pbc_feat.apply(ae, r_ae, ee, r_ee)
+      ae_features = jnp.concatenate([ae_features, ae_pbc_feat], axis=-1)
+      ee_features = jnp.concatenate([ee_features, ee_pbc_feat], axis=-1)
+    return ae_features, ee_features
+
+  return networks.FeatureLayer(init=init, apply=apply)
+
+
+def make_ds_features(
+    charges: Optional[jnp.ndarray] = None,
+    nspins: Optional[Tuple[int, ...]] = None,
+    ndim: int = 3,
+    lattice : Optional[jnp.ndarray] = None,
+    has_cos : Optional[bool] = False,
+    has_sym : Optional[bool] = False,
+):
+  if lattice is not None:
+    org_lattice = lattice / (2. * jnp.pi)
+    rec_lattice = jnp.linalg.inv(org_lattice)
+    inv_lattice = jnp.linalg.inv(lattice)
+  else :
+    org_lattice = None
+    rec_lattice = None
+    inv_lattice = None
+
+  def init() -> Tuple[Tuple[int, int], networks.Param]:
+    dim0 = ndim + 1
+    dim1 = ndim + 1
+    if has_cos:
+      dim0 += ndim
+      dim1 += ndim
+    if has_sym:
+      dim0 += ndim
+      dim1 += ndim
+    return (dim0, dim1), {}
+
+  def apply_(ae, r_ae, ee, r_ee) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    del r_ae, r_ee
+    
+    n = ee.shape[0]
+    prim_periodic_sea, prim_periodic_xea = ds.nu_distance(
+      ae, org_lattice, rec_lattice, has_sym=has_sym)
+    prim_periodic_sea = prim_periodic_sea[..., None]
+    # different ee convention, so use -ee
+    sim_periodic_see, sim_periodic_xee = ds.nu_distance(
+      -ee + jnp.eye(n)[..., None], org_lattice, rec_lattice, has_sym=has_sym)
+    sim_periodic_see = sim_periodic_see * (1.0 - jnp.eye(n))
+    sim_periodic_see = sim_periodic_see[..., None]
+    sim_periodic_xee = sim_periodic_xee * (1.0 - jnp.eye(n))[..., None]
+
+    ae_features = jnp.concatenate([prim_periodic_sea, prim_periodic_xea], axis=-1)
+    ee_features = jnp.concatenate([sim_periodic_see, sim_periodic_xee], axis=-1)
+
+    if has_cos:
+      def add_cos_feat(_ae_features, _ae):        
+        s_ae = jnp.matmul(_ae, inv_lattice)
+        cos__ae_feat = jnp.cos(2. * jnp.pi * s_ae)
+        _ae_features = jnp.concatenate([_ae_features, cos__ae_feat], axis=-1)
+        return _ae_features
+      ae_features = add_cos_feat(ae_features, ae)
+      ee_features = add_cos_feat(ee_features, ee)
+
+    ae_features = jnp.reshape(ae_features, [jnp.shape(ae_features)[0], -1])
+    # return ae_features, ee_features, prim_periodic_sea
+    return ae_features, ee_features
+
+  return networks.FeatureLayer(init=init, apply=apply_)
+

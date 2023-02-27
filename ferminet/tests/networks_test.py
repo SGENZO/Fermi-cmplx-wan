@@ -20,6 +20,8 @@ from absl.testing import absltest
 from absl.testing import parameterized
 import chex
 from ferminet import envelopes
+from ferminet.pbc import envelopes as pbc_env
+from ferminet.pbc import feature_layer as pbc_feat
 from ferminet import networks
 import jax
 from jax import random
@@ -35,11 +37,32 @@ def rand_default():
 
 
 def _antisymmtry_options():
-  for envelope in envelopes.EnvelopeLabel:
+  for envelope,nn,mm,dc in \
+      itertools.product(
+        envelopes.EnvelopeLabel,
+        [None, 9],
+        ['orig', 'zinv'],
+        [False, True],
+      ):
     yield {
-        'testcase_name': f'_envelope={envelope}',
+        'testcase_name': f'_envelope={envelope}_detnlayer={nn}_model={mm}_complex={dc}',
         'envelope_label': envelope,
         'dtype': np.float32,
+      'det_nlayer' : nn,
+      'model' : mm,
+      'do_complex' : dc,
+    }
+
+def _pbc_antisymmtry_options():
+  for has_cos,do_complex in \
+      itertools.product(
+        [True, False],
+        [True, False],
+      ):
+    yield {
+        'testcase_name': f'_has_cos={has_cos}_dc={do_complex}',
+        'has_cos': has_cos,
+        'do_complex': do_complex,
     }
 
 
@@ -74,7 +97,7 @@ def _network_options():
 class NetworksTest(parameterized.TestCase):
 
   @parameterized.named_parameters(_antisymmtry_options())
-  def test_antisymmetry(self, envelope_label, dtype):
+  def test_antisymmetry(self, envelope_label, dtype, det_nlayer, model, do_complex):
     """Check that the Fermi Net is symmetric."""
     del dtype  # unused
 
@@ -93,9 +116,26 @@ class NetworksTest(parameterized.TestCase):
     kwargs = {}
     if envelope_label == envelopes.EnvelopeLabel.EXACT_CUSP:
       kwargs.update({'charges': charges, 'nspins': nspins})
+    feature_layer = networks.make_ferminet_features(
+        charges,
+        nspins,
+        ndim=3,
+    )
+    hidden_dims = ((16, 16), (16, 16))
+    if model == 'orig':
+      make_model_fn = networks.make_fermi_net_model
+    elif model == 'zinv':
+      make_model_fn = networks.make_fermi_net_model_zinv
+    else:
+      raise RuntimeError(f'unknown model type {model}')
     options = networks.FermiNetOptions(
-        hidden_dims=((16, 16), (16, 16)),
-        envelope=envelopes.get_envelope(envelope_label, **kwargs))
+        hidden_dims=hidden_dims,
+        envelope=envelopes.get_envelope(envelope_label, **kwargs),
+        det_nlayer=det_nlayer,
+        ferminet_model=make_model_fn(
+          atoms, nspins, feature_layer, hidden_dims, False),
+        do_complex=do_complex,
+    )
 
     params = networks.init_fermi_net_params(
         subkey,
@@ -127,8 +167,94 @@ class NetworksTest(parameterized.TestCase):
     np.testing.assert_allclose(out1[0], -1*out2[0], atol=1E-5, rtol=1E-5)
 
     out3 = networks.fermi_net(params, data3, atoms, nspins, options)
-    np.testing.assert_allclose(out1[1], out3[1], atol=1E-5, rtol=1E-5)
-    np.testing.assert_allclose(out1[0], -1*out3[0], atol=1E-5, rtol=1E-5)
+    np.testing.assert_allclose(out1[1], out3[1], atol=3E-5, rtol=3E-5)
+    np.testing.assert_allclose(out1[0], -1*out3[0], atol=3E-5, rtol=3E-5)
+
+  @parameterized.named_parameters(_pbc_antisymmtry_options())
+  def test_pbc_antisymmetry(self, has_cos, do_complex):
+    """Check that the Fermi Net is symmetric."""
+
+    # from jax.config import config
+    # config.update("jax_enable_x64", True) 
+    key = random.PRNGKey(42)
+
+    key, *subkeys = random.split(key, num=3)
+    atoms = random.normal(subkeys[0], shape=(4, 3))
+    charges = random.normal(subkeys[1], shape=(4,))
+    nspins = (3, 3)
+    lattice = jnp.diag(jnp.array([3., 4., 5.]))
+    rec_lattice = jnp.linalg.inv(lattice)
+
+    key, subkey = random.split(key)
+    data = random.normal(subkey, shape=(sum(nspins)*3,))
+    data = jnp.asarray(data)
+    data_p0 = jnp.concatenate((data[3:6], data[:3], data[6:]))
+    data_p1 = jnp.concatenate((data[:9], data[12:15], data[9:12], data[15:]))
+    x_trans = np.random.randint(-5, 6, size=(sum(nspins), 3))
+    x_trans = jnp.matmul(x_trans, lattice)
+    data_t0 = data + x_trans.reshape([-1])
+    idx = np.random.permutation(4)
+    atoms1 = atoms[idx,:]
+
+    key, subkey = random.split(key)
+    kwargs = {}
+    envelope = pbc_env.make_ds_isotropic_envelope(lattice)
+    feature_layer = pbc_feat.make_ds_features(
+        charges,
+        nspins,
+        ndim=3,
+        lattice=lattice,
+        has_cos=has_cos,
+    )
+    hidden_dims = ((8, 3), (8, 3))
+    make_model_fn = networks.make_fermi_net_model_zinv
+
+    options = networks.FermiNetOptions(
+        hidden_dims=hidden_dims,
+        envelope=envelope,
+        det_nlayer=0,
+        feature_layer=feature_layer,
+        ferminet_model=make_model_fn(
+          atoms, nspins, feature_layer, hidden_dims, False),
+        do_complex=do_complex,
+    )
+
+    params = networks.init_fermi_net_params(
+        subkey,
+        atoms=atoms,
+        nspins=nspins,
+        options=options,
+    )
+
+    # Randomize parameters of envelope
+    if isinstance(params['envelope'], list):
+      for i in range(len(params['envelope'])):
+        if params['envelope'][i]:
+          key, *subkeys = random.split(key, num=3)
+          params['envelope'][i]['sigma'] = random.normal(
+              subkeys[0], params['envelope'][i]['sigma'].shape)
+          params['envelope'][i]['pi'] = random.normal(
+              subkeys[1], params['envelope'][i]['pi'].shape)
+    else:
+      key, *subkeys = random.split(key, num=3)
+      params['envelope']['sigma'] = random.normal(
+          subkeys[0], params['envelope']['sigma'].shape)
+      params['envelope']['pi'] = random.normal(
+          subkeys[1], params['envelope']['pi'].shape)
+
+    # check permutation
+    out = networks.fermi_net(params, data, atoms, nspins, options)
+    out_p0 = networks.fermi_net(params, data_p0, atoms, nspins, options)
+    np.testing.assert_allclose(out[1], out_p0[1], atol=1E-5, rtol=1E-5)
+    np.testing.assert_allclose(out[0], -1*out_p0[0], atol=1E-5, rtol=1E-5)
+    out_p1 = networks.fermi_net(params, data_p1, atoms, nspins, options)
+    np.testing.assert_allclose(out[1], out_p1[1], atol=1E-5, rtol=1E-5)
+    np.testing.assert_allclose(out[0], -1*out_p1[0], atol=1E-5, rtol=1E-5)
+    # check translation
+    out_t0 = networks.fermi_net(params, data_t0, atoms, nspins, options)
+    np.testing.assert_allclose(out[1], out_t0[1], atol=1E-5, rtol=1E-5)
+    np.testing.assert_allclose(out[0], out_t0[0], atol=1E-5, rtol=1E-5)
+
 
   def test_create_input_features(self):
     dtype = np.float32

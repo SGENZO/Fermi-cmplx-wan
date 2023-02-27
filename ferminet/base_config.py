@@ -52,7 +52,6 @@ def default() -> ml_collections.ConfigDict:
       # function, as config_flags overrides this when importing the module using
       # importlib.import_module.
       'config_module': __name__,
-      'precision': 'float',
       'optim': {
           'iterations': 1000000,  # number of iterations
           'optimizer': 'kfac',  # one of adam, kfac, lamb, none
@@ -122,7 +121,6 @@ def default() -> ml_collections.ConfigDict:
           # Angstroms are converged to Bohr.
           'units': 'bohr',
           # 2. Specify the system using pyscf. Must be a pyscf.gto.Mole object.
-          # 2.1 Specify the system using pyscf. Must be a pyscf.pbc.gto.Cell object.
           'pyscf_mol': None,
           # 3. Specify the system inside a function evaluated after the config
           # has been parsed.
@@ -169,35 +167,11 @@ def default() -> ml_collections.ConfigDict:
       },
       'network': {
           'detnet': {
-              #'hidden_dims': ((256, 32), (256, 32), (256, 32), (256, 32)),
-              'hidden_dims': {
-                'type_embd' : False,
-                'cntr_type' : False,
-                'n_conv_layers' : 4,
-                'nfeat' : 64,
-                'nodim' : 32,
-                'embd' : [32, 64],
-                'fitt' : [64, 64, 64],
-                'feat' : [64],
-                'geminal' : False,
-                'power' : 1.0,
-                'rinv_shift' : 1.0,
-                'onehot_scale' : 1.0,
-                'do_data_stat' : True,
-                'avg_env_mat' : [0., 0., 0., 0.],
-                'std_env_mat' : [1., 1., 1., 1.],
-                'cat_sum_embd' : True,
-                'nele_sel' : -1,
-                'nion_sel' : -1,
-                'rc_mode' : None,
-                'rc_cntr' : 10.0,
-                'rc_sprd' : 0.2,
-                'only_ele': False,
-                'use_ae_feat' : False,
-                'nearest_neighbor' : 'auto',
-              },
+              'hidden_dims': ((256, 32), (256, 32), (256, 32), (256, 32)),
               'determinants': 16,
               'after_determinants': (1,),
+              'det_nlayer' : None,
+              'do_complex' : False,
           },
           'bias_orbitals': False,  # include bias in last layer to orbitals
           # Whether to use the last layer of the two-electron stream of the
@@ -217,7 +191,10 @@ def default() -> ml_collections.ConfigDict:
           'make_feature_layer_kwargs': {},
           # Same structure as make_feature_layer
           'make_envelope_fn': '',
-          'make_envelope_kwargs': {}
+          'make_envelope_kwargs': {},
+          # Same structure as make_feature_layer
+          'make_model_fn': '',
+          'make_model_kwargs': {},
       },
       'debug': {
           # Check optimizer state, parameters and loss and raise an exception if

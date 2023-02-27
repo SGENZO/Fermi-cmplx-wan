@@ -104,7 +104,9 @@ def slogdet(x):
 
 
 def logdet_matmul(xs: Sequence[jnp.ndarray],
-                  w: Optional[jnp.ndarray] = None) -> jnp.ndarray:
+                  w: Optional[jnp.ndarray] = None,
+                  do_complex: bool = False,
+) -> jnp.ndarray:
   """Combines determinants and takes dot product with weights in log-domain.
 
   We use the log-sum-exp trick to reduce numerical instabilities.
@@ -140,7 +142,19 @@ def logdet_matmul(xs: Sequence[jnp.ndarray],
   if w is None:
     result = jnp.sum(det)
   else:
-    result = jnp.matmul(det, w)[0]
-  sign_out = jnp.sign(result)
+    if isinstance(w, list):
+      for i in range(len(w)):
+        if i != len(w)-1:
+          det_next = jnp.tanh(linear_layer(det, **w[i]))
+        else:
+          det_next = linear_layer(det, **w[i])
+        det = 1./jnp.sqrt(2.) * (det + det_next)
+      result = jnp.sum(det)
+    else:
+      result = jnp.matmul(det, w)[0]
+  if not do_complex:
+    sign_out = jnp.sign(result)
+  else:
+    sign_out = jnp.exp(1j * jnp.angle(result))
   log_out = jnp.log(jnp.abs(result)) + maxlogdet
   return sign_out, log_out

@@ -1,5 +1,7 @@
 # FermiNet: Fermionic Neural Networks
 
+branch main-nn: nearest neighbor search.
+
 FermiNet is a neural network for learning highly accurate ground state
 wavefunctions of atoms and molecules using a variational Monte Carlo approach.
 

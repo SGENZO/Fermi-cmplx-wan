@@ -27,7 +27,7 @@ REQUIRED_PACKAGES = [
     'jax',
     'jaxlib',
     # TODO(b/230487443) - use released version of kfac.
-    'kfac_jax @ git+https://github.com/deepmind/kfac-jax',
+#    'kfac_jax @ git+https://github.com/deepmind/kfac-jax',
     'ml-collections',
     'optax',
     'numpy',
@@ -61,4 +61,6 @@ setup(
     platforms=['any'],
     license='Apache 2.0',
     test_suite='setup.ferminet_test_suite',
+    setup_requires=['setuptools_scm'],
+    use_scm_version={'write_to': 'ferminet/_version.py'},
 )

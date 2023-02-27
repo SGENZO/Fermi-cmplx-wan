@@ -27,14 +27,15 @@ from ferminet import curvature_tags_and_blocks
 from ferminet import envelopes
 from ferminet import hamiltonian
 from ferminet import loss as qmc_loss_functions
+from ferminet.cmplx import loss as qmc_cmplx_loss_functions
 from ferminet import mcmc
 from ferminet import networks
 from ferminet import pretrain
-from ferminet import dp
 from ferminet.utils import multi_host
 from ferminet.utils import statistics
 from ferminet.utils import system
 from ferminet.utils import writers
+from ferminet import __version__
 import jax
 import jax.numpy as jnp
 import kfac_jax
@@ -43,8 +44,6 @@ import numpy as np
 import optax
 from typing_extensions import Protocol
 
-from jax.config import config
-# config.update ('jax_disable_jit', True)
 
 def init_electrons(
     key,
@@ -283,6 +282,14 @@ def make_kfac_training_step(mcmc_step, damping: float,
   return step
 
 
+def make_cmplx_network(f):
+  def _network(*args, **kwargs):
+    ss, vv = f(*args, **kwargs)
+    ret = jnp.log(ss) + vv
+    return ret
+  return _network
+
+
 def train(cfg: ml_collections.ConfigDict, writer_manager=None):
   """Runs training loop for QMC.
 
@@ -295,6 +302,8 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
   Raises:
     ValueError: if an illegal or unsupported value in cfg is detected.
   """
+  # log version
+  logging.info('Version of the code ' + __version__)
   # Device logging
   num_devices = jax.local_device_count()
   num_hosts = jax.device_count() // num_devices
@@ -322,7 +331,7 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
   atoms = jnp.stack([jnp.array(atom.coords) for atom in cfg.system.molecule])
   charges = jnp.array([atom.charge for atom in cfg.system.molecule])
   nspins = cfg.system.electrons
-  lattice = cfg.network.make_feature_layer_kwargs.get("lattice")
+  lattice = cfg.system.make_local_energy_kwargs.get("lattice")
 
   if cfg.debug.deterministic:
     seed = 23
@@ -330,40 +339,6 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
     seed = 1e6 * time.time()
     seed = int(multi_host.broadcast_to_hosts(seed))
   key = jax.random.PRNGKey(seed)
-
-  if cfg.network.detnet.hidden_dims.do_data_stat:
-    # init data stat to find the normalization of env_mat
-    # dirty hacking: always use the same random seed and batch_size
-    stat_seed = 0
-    stat_key = jax.random.PRNGKey(stat_seed)
-    stat_batch_size = 1024
-    stat_data = init_electrons(
-      stat_key,
-      cfg.system.molecule,
-      cfg.system.electrons,
-      batch_size=stat_batch_size,
-      init_width=cfg.mcmc.init_width,
-    )
-    # compute the stat env mat
-    stat_env_mat, _, _ = jax.vmap(dp.compute_env_mat, in_axes=(0,None,None,None,None))(
-      stat_data,
-      cfg.network.detnet.hidden_dims.power,
-      cfg.network.detnet.hidden_dims.rinv_shift,
-      cfg.network.detnet.hidden_dims.rc_cntr,
-      cfg.network.detnet.hidden_dims.rc_sprd,
-    )
-    stat_env_mat = jnp.reshape(stat_env_mat, [-1,4])
-    split_env_mat = jnp.split(stat_env_mat, [1,2,3], axis=-1)
-    avg_env_mat_ = [jnp.average(ii) for ii in split_env_mat]
-    std_env_mat_ = [jnp.std(ii) for ii in split_env_mat]
-    # average and standard deviation
-    avg_env_mat = avg_env_mat_ 
-    std_env_mat = [1./std for std in std_env_mat_]
-    cfg.network.detnet.hidden_dims.avg_env_mat = avg_env_mat
-    cfg.network.detnet.hidden_dims.std_env_mat = std_env_mat
-    logging.info(f"avg of data stat {avg_env_mat}")
-    logging.info(f"std of data stat {std_env_mat}")
-
 
   # Create parameters, network, and vmaped/pmaped derivations
 
@@ -374,17 +349,12 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
         molecule=cfg.system.molecule,
         nspins=nspins,
         restricted=False,
-        basis=cfg.pretrain.basis,
-        lattice=lattice,
-    )
+        basis=cfg.pretrain.basis)
     # broadcast the result of PySCF from host 0 to all other hosts
-    if hartree_fock is not None :
-      hartree_fock.mean_field.mo_coeff = tuple([
+    hartree_fock.mean_field.mo_coeff = tuple([
         multi_host.broadcast_to_hosts(x)
         for x in hartree_fock.mean_field.mo_coeff
     ])
-  else:
-    hartree_fock = None
 
   hf_solution = hartree_fock if cfg.pretrain.method == 'direct_init' else None
 
@@ -411,11 +381,30 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
     envelope_module = importlib.import_module(envelope_module)
     make_envelope = getattr(envelope_module, envelope_fn)
     envelope = make_envelope(**cfg.network.make_envelope_kwargs)  # type: envelopes.Envelope
-    if cfg.network.make_envelope_kwargs.get('kpoints', None) is not None:
-      logging.info(f"====In total {cfg.network.make_envelope_kwargs['kpoints'].shape[0]} "\
-                   "kpoints are used in the envelope")
   else:
     envelope = envelopes.make_isotropic_envelope()
+
+  if cfg.network.make_model_fn:
+    model_module, model_fn = (
+        cfg.network.make_model_fn.rsplit('.', maxsplit=1))
+    model_module = importlib.import_module(model_module)
+    make_model = getattr(model_module, model_fn)
+    ferminet_model = make_model(
+      atoms,
+      nspins,
+      feature_layer,
+      cfg.network.detnet.hidden_dims,
+      cfg.network.use_last_layer,
+      **cfg.network.make_model_kwargs,
+    )
+  else:
+    ferminet_model = networks.make_fermi_net_model(
+      atoms,
+      nspins,
+      feature_layer,
+      cfg.network.detnet.hidden_dims,
+      cfg.network.use_last_layer,
+    )
 
   network_init, signed_network, network_options = networks.make_fermi_net(
       atoms,
@@ -423,36 +412,27 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
       charges,
       envelope=envelope,
       feature_layer=feature_layer,
+      ferminet_model=ferminet_model,
       bias_orbitals=cfg.network.bias_orbitals,
       use_last_layer=cfg.network.use_last_layer,
       hf_solution=hf_solution,
       full_det=cfg.network.full_det,
-      **cfg.network.detnet,
       lattice=lattice,
+      **cfg.network.detnet,
   )
   key, subkey = jax.random.split(key)
   params = network_init(subkey)
-  # params num
-  logging.info(f"====The total params number is===  {jax.flatten_util.ravel_pytree(params)[0].shape[0]}")
   params = kfac_jax.utils.replicate_all_local_devices(params)
   # Often just need log|psi(x)|.
-  network = lambda *args, **kwargs: signed_network(*args, **kwargs)[1]  # type: networks.LogFermiNetLike
+  abs_network = lambda *args, **kwargs: signed_network(*args, **kwargs)[1]  # type: networks.LogFermiNetLike
+  if cfg.network.detnet.do_complex:
+    network = make_cmplx_network(signed_network)
+  else:
+    network = abs_network
   batch_network = jax.vmap(
       network, in_axes=(None, 0), out_axes=0)  # batched network
-  # neighbor analysis
-  if lattice is not None:
-    rc_cntr = cfg.network.detnet.hidden_dims.rc_cntr
-    shift_vec = jnp.asarray(dp.compute_shift_vec(rc_cntr, lattice,))
-    data_max_ele_nei = lambda data: jnp.max(constants.pmap(
-      dp.make_max_ele_nnei(lattice, shift_vec, rc_cntr, nspins), in_axes=(0))(data))
-    do_ion = not (cfg.system.molecule[0].symbol == 'X')
-    if do_ion: 
-      data_max_ion_nei = lambda data: jnp.max(constants.pmap(
-        dp.make_max_ion_nnei(atoms, lattice, shift_vec, rc_cntr), in_axes=(0))(data))
-    else :
-      data_max_ion_nei = lambda data: 0
-  else:
-    shift_vec = None
+  batch_abs_network = jax.vmap(
+      abs_network, in_axes=(None, 0), out_axes=0)  # batched network
 
   # Set up checkpointing and restore params/data if necessary
   # Mirror behaviour of checkpoints in TF FermiNet.
@@ -490,9 +470,7 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
     mcmc_width_ckpt = None
 
   # Set up logging
-  train_schema = ['step', 'energy', 'ewmean', 'ewvar', 'pmove']
-  if shift_vec is not None:
-    train_schema += ['maxenei', 'maxinei']
+  train_schema = ['step', 'energy', 'ewmean', 'ewvar', 'pmove', 'loss_imag']
 
   # Initialisation done. We now want to have different PRNG streams on each
   # device. Shard the key over devices
@@ -500,19 +478,11 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
 
   # Pretraining to match Hartree-Fock
 
-  if cfg.system.make_local_energy_fn:
-    do_heg = cfg.system.make_local_energy_kwargs.get('heg', False)
-  else:
-    do_heg = False
-  # if lattice is not None and not do_heg and hartree_fock is None:
-  #   raise RuntimeError('We have a PBC system that is not HEG',
-  #                      'The pyscf molecule is required.')
   if (t_init == 0 and cfg.pretrain.method == 'hf' and
       cfg.pretrain.iterations > 0):
     orbitals = functools.partial(
         networks.fermi_net_orbitals,
         atoms=atoms,
-        charges=charges,
         nspins=cfg.system.electrons,
         options=network_options,
     )
@@ -531,23 +501,18 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
         atoms=atoms,
         electrons=cfg.system.electrons,
         scf_approx=hartree_fock,
-        iterations=cfg.pretrain.iterations, 
-        use_geminal=cfg.network.detnet.hidden_dims.geminal,
-        lattice=lattice,
-        heg=do_heg,
-    )
+        iterations=cfg.pretrain.iterations)
 
   # Main training
 
   # Construct MCMC step
   atoms_to_mcmc = atoms if cfg.mcmc.scale_by_nuclear_distance else None
   mcmc_step = mcmc.make_mcmc_step(
-      batch_network,
+      batch_abs_network,
       device_batch_size,
       steps=cfg.mcmc.steps,
       atoms=atoms_to_mcmc,
       one_electron_moves=cfg.mcmc.one_electron,
-      lattice=lattice,
   )
   # Construct loss and optimizer
   if cfg.system.make_local_energy_fn:
@@ -556,20 +521,28 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
     local_energy_module = importlib.import_module(local_energy_module)
     make_local_energy = getattr(local_energy_module, local_energy_fn)  # type: hamiltonian.MakeLocalEnergy
     local_energy = make_local_energy(
-        f=signed_network,
+        f=network,
         atoms=atoms,
         charges=charges,
         nspins=nspins,
         use_scan=False,
-        **cfg.system.make_local_energy_kwargs)
+        do_complex=cfg.network.detnet.do_complex,
+        **cfg.system.make_local_energy_kwargs,
+    )
   else:
     local_energy = hamiltonian.local_energy(
-        f=signed_network,
+        f=network,
         atoms=atoms,
         charges=charges,
         nspins=nspins,
-        use_scan=False)
-  evaluate_loss = qmc_loss_functions.make_loss(
+        use_scan=False,
+        do_complex=cfg.network.detnet.do_complex,
+    )
+  if cfg.network.detnet.do_complex:
+    my_make_loss = qmc_cmplx_loss_functions.make_loss
+  else:
+    my_make_loss = qmc_loss_functions.make_loss
+  evaluate_loss = my_make_loss(
       network,
       local_energy,
       clip_local_energy=cfg.optim.clip_el)
@@ -577,7 +550,6 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
   def learning_rate_schedule(t_: jnp.ndarray) -> jnp.ndarray:
     return cfg.optim.lr.rate * jnp.power(
         (1.0 / (1.0 + (t_/cfg.optim.lr.delay))), cfg.optim.lr.decay)
-  logging.info(f'start lr: {learning_rate_schedule(jnp.array([0]))[0]}  stop lr: {learning_rate_schedule(jnp.array([cfg.optim.iterations]))[0]}')
 
   # Construct and setup optimizer
   if cfg.optim.optimizer == 'none':
@@ -667,13 +639,9 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
     logging.info('Completed burn-in MCMC steps')
     sharded_key, subkeys = kfac_jax.utils.p_split(sharded_key)
     ptotal_energy = constants.pmap(evaluate_loss)
-    initial_energy, _ = ptotal_energy(params, subkeys, data)
+    initial_energy, _loss_aux = ptotal_energy(params, subkeys, data)
     logging.info('Initial energy: %03.4f E_h', initial_energy[0])
-
-    # neighbor analysis
-    if shift_vec is not None:
-      logging.info(f'Initial max ele nnei {str(np.asarray(data_max_ele_nei(data)))} '
-                   f'ion nnei {str(np.asarray(data_max_ion_nei(data)))}')
+    logging.info('Imag part of the initial loss: %03.4f E_h', _loss_aux.loss_imag[0])
 
   time_of_last_ckpt = time.time()
   weighted_stats = None
@@ -734,18 +702,15 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
         logging.info(
             'Step %05d: %03.4f E_h, exp. variance=%03.4f E_h^2, pmove=%0.2f', t,
             loss, weighted_stats.variance, pmove)
-        write_data = {
-          'step' : t,
-          'energy' : np.asarray(loss),
-          'ewmean' : np.asarray(weighted_stats.mean),
-          'ewvar' : np.asarray(weighted_stats.variance),
-          'pmove' : np.asarray(pmove),
-        }
-        # neighbor analysis
-        if shift_vec is not None:
-          write_data['maxenei'] = np.asarray(data_max_ele_nei(data))
-          write_data['maxinei'] = np.asarray(data_max_ion_nei(data))
-        writer.write(t, **write_data,)
+        writer.write(
+            t,
+            step=t,
+            energy=np.asarray(loss),
+            ewmean=np.asarray(weighted_stats.mean),
+            ewvar=np.asarray(weighted_stats.variance),
+            pmove=np.asarray(pmove),
+            loss_imag=np.asarray(unused_aux_data.loss_imag[0]),
+        )        
 
       # Checkpointing
       if time.time() - time_of_last_ckpt > cfg.log.save_frequency * 60:

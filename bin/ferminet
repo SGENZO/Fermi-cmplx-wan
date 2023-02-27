@@ -27,7 +27,6 @@ FLAGS = flags.FLAGS
 
 config_flags.DEFINE_config_file('config', None, 'Path to config file.')
 from jax.config import config
-# config.update ('jax_disable_jit', True)
 
 
 def main(_):

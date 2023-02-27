@@ -24,24 +24,6 @@ from jax import lax
 from jax import numpy as jnp
 
 
-def direct_coord(
-        xx : jnp.array,
-        lattice : jnp.array,
-):
-    rec_latt = jnp.linalg.inv(lattice)
-    return jnp.matmul(jnp.reshape(xx, [-1,3]), rec_latt)
-
-
-def apply_pbc(
-        xx : jnp.array,
-        lattice : jnp.array,
-)->jnp.array:
-    dir_xx = direct_coord(xx, lattice)
-    mod_xx = jnp.mod(dir_xx, 1.0)
-    new_xx = jnp.matmul(mod_xx, lattice).reshape(xx.shape)
-    return new_xx
-
-
 def _harmonic_mean(x, atoms):
   """Calculates the harmonic mean of each electron distance to the nuclei.
 
@@ -87,9 +69,7 @@ def mh_update(params,
               num_accepts,
               stddev=0.02,
               atoms=None,
-              i=0,
-              lattice=None,
-):
+              i=0):
   """Performs one Metropolis-Hastings step using an all-electron move.
 
   Args:
@@ -119,8 +99,6 @@ def mh_update(params,
   key, subkey = jax.random.split(key)
   if atoms is None:  # symmetric proposal, same stddev everywhere
     x2 = x1 + stddev * jax.random.normal(subkey, shape=x1.shape)  # proposal
-    if lattice is not None:
-        x2 = apply_pbc(x2, lattice)
     lp_2 = 2. * f(params, x2)  # log prob of proposal
     ratio = lp_2 - lp_1
   else:  # asymmetric proposal, stddev propto harmonic mean of nuclear distances
@@ -129,8 +107,6 @@ def mh_update(params,
     hmean1 = _harmonic_mean(x1, atoms)  # harmonic mean of distances to nuclei
 
     x2 = x1 + stddev * hmean1 * jax.random.normal(subkey, shape=x1.shape)
-    if lattice is not None:
-        x2 = apply_pbc(x2, lattice)
     lp_2 = 2. * f(params, x2)  # log prob of proposal
     hmean2 = _harmonic_mean(x2, atoms)  # needed for probability of reverse jump
 
@@ -146,8 +122,6 @@ def mh_update(params,
   x_new = jnp.where(cond[..., None], x2, x1)
   lp_new = jnp.where(cond, lp_2, lp_1)
   num_accepts += jnp.sum(cond)
-  if lattice is not None:
-    x_new = apply_pbc(x_new, lattice)
 
   return x_new, key, lp_new, num_accepts
 
@@ -216,9 +190,7 @@ def make_mcmc_step(batch_network,
                    batch_per_device,
                    steps=10,
                    atoms=None,
-                   one_electron_moves=False,
-                   lattice=None,
-):
+                   one_electron_moves=False):
   """Creates the MCMC step function.
 
   Args:
@@ -256,7 +228,7 @@ def make_mcmc_step(batch_network,
 
     def step_fn(i, x):
       return inner_fun(
-          params, batch_network, *x, stddev=width, atoms=atoms, i=i, lattice=lattice)
+          params, batch_network, *x, stddev=width, atoms=atoms, i=i)
 
     nelec = data.shape[-1] // 3
     nsteps = nelec * steps if one_electron_moves else steps

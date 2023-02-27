@@ -27,6 +27,7 @@ from ferminet import hamiltonian
 from ferminet import networks
 import jax
 import jax.numpy as jnp
+from ferminet.cmplx import hamiltonian as cmplx_h
 
 
 def make_ewald_potential(
@@ -157,7 +158,9 @@ def local_energy(f: networks.FermiNetLike,
                  use_scan: bool = False,
                  lattice: Optional[jnp.ndarray] = None,
                  heg: bool = True,
-                 convergence_radius: int = 5) -> hamiltonian.LocalEnergy:
+                 convergence_radius: int = 5,
+                 do_complex: bool = False,
+) -> hamiltonian.LocalEnergy:
   """Creates the local energy function in periodic boundary conditions.
 
   Args:
@@ -182,8 +185,13 @@ def local_energy(f: networks.FermiNetLike,
   if lattice is None:
     lattice = jnp.eye(3)
 
-  log_abs_f = lambda *args, **kwargs: f(*args, **kwargs)[1]
-  ke = hamiltonian.local_kinetic_energy(log_abs_f, use_scan=use_scan)
+  # log_abs_f = lambda *args, **kwargs: f(*args, **kwargs)[1]
+  # already take the value of the network
+  log_abs_f = f
+  if do_complex:
+    ke = cmplx_h.local_kinetic_energy(log_abs_f)
+  else:
+    ke = hamiltonian.local_kinetic_energy(log_abs_f, use_scan=use_scan)
   potential_energy = make_ewald_potential(lattice, atoms, charges,
                                           convergence_radius, heg)
 

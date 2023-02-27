@@ -18,13 +18,11 @@ from typing import Callable, Optional, Sequence, Tuple, Union
 
 from absl import logging
 import chex
-import ferminet
 from ferminet import constants
 from ferminet import envelopes
 from ferminet import mcmc
 from ferminet import networks
 from ferminet.utils import scf
-from ferminet.pbc import scf as pbc_scf
 from ferminet.utils import system
 import jax
 from jax import numpy as jnp
@@ -42,28 +40,6 @@ FermiNetOrbitals = Callable[[networks.ParamTree, jnp.ndarray],
 
 
 def get_hf(molecule: Optional[Sequence[system.Atom]] = None,
-           nspins: Optional[Tuple[int, int]] = None,
-           basis: Optional[str] = 'sto-3g',
-           pyscf_mol: Optional[pyscf.gto.Mole] = None,
-           restricted: Optional[bool] = False,
-           lattice : Optional[np.ndarray] = None,
-) -> scf.Scf:
-  if lattice is None:
-    scf_approx = get_hf_mol(
-      molecule=molecule, nspins=nspins, basis=basis,
-      pyscf_mol=pyscf_mol, restricted=restricted,
-    )
-  else:
-    if pyscf_mol is None:
-      # raise RuntimeError("the pyscf molecule should be provided when using pbc")
-      return None
-    if not isinstance(pyscf_mol, pyscf.pbc.gto.Cell):
-      raise RuntimeError("the pyscf molecule should be of type pyscf.pbc.gto.Cell")
-    scf_approx = pbc_scf.Scf(pyscf_mol, restricted=restricted)
-    scf_approx.run()
-  return scf_approx
-
-def get_hf_mol(molecule: Optional[Sequence[system.Atom]] = None,
            nspins: Optional[Tuple[int, int]] = None,
            basis: Optional[str] = 'sto-3g',
            pyscf_mol: Optional[pyscf.gto.Mole] = None,
@@ -89,7 +65,7 @@ def get_hf_mol(molecule: Optional[Sequence[system.Atom]] = None,
 
 
 def eval_orbitals(scf_approx: scf.Scf, pos: Union[np.ndarray, jnp.ndarray],
-                  nspins: Tuple[int, int], use_geminal: bool=False) -> Tuple[np.ndarray, np.ndarray]:
+                  nspins: Tuple[int, int]) -> Tuple[np.ndarray, np.ndarray]:
   """Evaluates SCF orbitals from PySCF at a set of positions.
 
   Args:
@@ -118,14 +94,8 @@ def eval_orbitals(scf_approx: scf.Scf, pos: Union[np.ndarray, jnp.ndarray],
   mos = [np.reshape(mo, leading_dims + (sum(nspins), -1)) for mo in mos]
   # Return (using Aufbau principle) the matrices for the occupied alpha and
   # beta orbitals. Number of alpha electrons given by nspins[0].
-  if use_geminal:
-    # nb x nele0 x nmo
-    alpha_spin = mos[0][..., :nspins[0], :]
-    # nb x nele1 x nmo
-    beta_spin = mos[1][..., nspins[0]:, :]
-  else:
-    alpha_spin = mos[0][..., :nspins[0], :nspins[0]]
-    beta_spin = mos[1][..., nspins[0]:, :nspins[1]]
+  alpha_spin = mos[0][..., :nspins[0], :nspins[0]]
+  beta_spin = mos[1][..., nspins[0]:, :nspins[1]]
   return alpha_spin, beta_spin
 
 
@@ -154,9 +124,7 @@ def make_pretrain_step(batch_envelope_fn,
                        batch_orbitals: FermiNetOrbitals,
                        batch_network: networks.LogFermiNetLike,
                        optimizer_update: optax.TransformUpdateFn,
-                       full_det: bool = False,
-                       lattice: np.ndarray = None,
-                       ):
+                       full_det: bool = False):
   """Creates function for performing one step of Hartre-Fock pretraining.
 
   Args:
@@ -210,82 +178,11 @@ def make_pretrain_step(batch_envelope_fn,
     updates, state = optimizer_update(search_direction, state, params)
     params = optax.apply_updates(params, updates)
     data, key, logprob, _ = mcmc.mh_update(params, batch_network, data, key,
-                                           logprob, 0,
-                                           lattice=lattice,
-                                           )
-    return data, params, state, loss_val, logprob
-
-  return pretrain_step
-
-
-def make_gemi_pretrain_step(batch_envelope_fn,
-                       batch_orbitals: FermiNetOrbitals,
-                       batch_network: networks.LogFermiNetLike,
-                       optimizer_update: optax.TransformUpdateFn,
-                       full_det: bool = True):
-  """Creates function for performing one step of Hartre-Fock pretraining.
-
-  Args:
-    batch_envelope_fn: callable with signature f(params, data) which, given a
-      batch of electron positions and the tree of envelope network parameters,
-      returns the multiplicative envelope to apply to the orbitals. See envelope
-      functions in networks for details. Only required if the envelope is not
-      included in batch_orbitals.
-    batch_orbitals: callable with signature f(params, data), which given network
-      parameters and a batch of electron positions, returns the orbitals in
-      the network evaluated at those positions.
-    batch_network: callable with signature f(params, data), which given network
-      parameters and a batch of electron positions, returns the log of the
-      magnitude of the (wavefunction) network  evaluated at those positions.
-    optimizer_update: callable for transforming the gradients into an update (ie
-      conforms to the optax API).
-    full_det: If true, evaluate all electrons in a single determinant.
-      Otherwise, evaluate products of alpha- and beta-spin determinants.
-
-  Returns:
-    Callable for performing a single pretraining optimisation step.
-  """
-  del full_det
-
-  def pretrain_step(data, target, params, state, key, logprob):
-
-    def loss_fn(p, x, target):
-      # nb x nele0/nele1 x nele
-      gemi_a, gemi_b = target
-      nb = gemi_a.shape[0]
-      nmo = gemi_a.shape[-1]
-      nele0 = gemi_a.shape[1]
-      nele1 = gemi_b.shape[1]
-      numb_pad = nele0 - nele1
-
-      env = jnp.exp(batch_envelope_fn(p['envelope'], x) / nele0)
-      env = jnp.reshape(env, [env.shape[-1], 1, 1, 1])
-      # nb x nele0/nele1 x (nmo-pad_num)
-      gemi_a_cut = jax.lax.dynamic_slice(gemi_a, (0,0,0), (nb, nele0, nmo-numb_pad))
-      gemi_b_cut = jax.lax.dynamic_slice(gemi_b, (0,0,0), (nb, nele1, nmo-numb_pad))
-      # nb x nele0 x nele1
-      target_mat = jnp.einsum('ijk,ilk ->ijl', gemi_a_cut, gemi_b_cut)
-      if numb_pad>0:
-        # nb x nele0 x numb_pad
-        pad_mat = jax.lax.dynamic_slice(gemi_a, (0,0,nmo-numb_pad), (nb, nele0, numb_pad))
-        # nb x nele0 x nele0
-        target_mat = jnp.concatenate([target_mat, pad_mat], axis = -1)
-
-      # nb x ndet x nele0 x nele0
-      result = jnp.mean(
-          (target_mat[:, None, ...] - env * batch_orbitals(p, x)[0])**2)
-      return constants.pmean(result)
-
-    val_and_grad = jax.value_and_grad(loss_fn, argnums=0)
-    loss_val, search_direction = val_and_grad(params, data, target)
-    search_direction = constants.pmean(search_direction)
-    updates, state = optimizer_update(search_direction, state, params)
-    params = optax.apply_updates(params, updates)
-    data, key, logprob, _ = mcmc.mh_update(params, batch_network, data, key,
                                            logprob, 0)
     return data, params, state, loss_val, logprob
 
   return pretrain_step
+
 
 def pretrain_hartree_fock(
     *,
@@ -300,9 +197,6 @@ def pretrain_hartree_fock(
     scf_approx: scf.Scf,
     iterations: int = 1000,
     logger: Optional[Callable[[int, float], None]] = None,
-    use_geminal: bool = False,
-    lattice : Optional[np.ndarray] = None,
-    heg : Optional[bool] = False,
 ):
   """Performs training to match initialization as closely as possible to HF.
 
@@ -349,31 +243,18 @@ def pretrain_hartree_fock(
     envelope_fn = lambda p, x: 0.0
   batch_envelope_fn = jax.vmap(envelope_fn, (None, 0))
 
-  if use_geminal:
-    get_pretrain_step = make_gemi_pretrain_step
-  else:
-    get_pretrain_step = make_pretrain_step
-  if heg :
-    from ferminet.pbc.pretrain import make_eval_orbitals    
-    pt_eval_orb = make_eval_orbitals(lattice, electrons, do_complex=False)
-  else:
-    pt_eval_orb = eval_orbitals
-
-  pretrain_step = get_pretrain_step(
+  pretrain_step = make_pretrain_step(
       batch_envelope_fn,
       batch_orbitals,
       batch_network,
       optimizer.update,
-      full_det=network_options.full_det,
-      lattice=lattice,
-  )
+      full_det=network_options.full_det)
   pretrain_step = constants.pmap(pretrain_step)
   pnetwork = constants.pmap(batch_network)
   logprob = 2. * pnetwork(params, data)
 
   for t in range(iterations):
-    data_ = np.array(data, dtype=np.float64)
-    target = pt_eval_orb(scf_approx, data_, electrons, use_geminal=use_geminal)
+    target = eval_orbitals(scf_approx, data, electrons)
     sharded_key, subkeys = kfac_jax.utils.p_split(sharded_key)
     data, params, opt_state_pt, loss, logprob = pretrain_step(
         data, target, params, opt_state_pt, subkeys, logprob)

@@ -105,7 +105,6 @@ class Envelope:
 
 def _apply_covariance(x: jnp.ndarray, y: jnp.ndarray) -> jnp.ndarray:
   """Equivalent to jnp.einsum('ijk,kmjn->ijmn', x, y)."""
-  """i: nele  j: nion  m: 3  n: orb_dim"""
   # We can avoid first reshape - just make params['sigma'] rank 3
   i, _, _ = x.shape
   k, m, j, n = y.shape
@@ -182,12 +181,9 @@ def make_full_envelope() -> Envelope:
     """Computes a fully anisotropic exponentially-decaying envelope."""
     del r_ae, r_ee  # unused
     ae_sigma = _apply_covariance(ae, sigma)
-    # nele x nion x 3 x orb_dim
     ae_sigma = curvature_tags_and_blocks.register_qmc(
         ae_sigma, ae, sigma, type='full')
-    # nele x nion x orb_dim
     r_ae_sigma = jnp.linalg.norm(ae_sigma, axis=2)
-    # # nele x orb_dim
     return jnp.sum(jnp.exp(-r_ae_sigma) * pi, axis=1)
 
   return Envelope(EnvelopeType.PRE_DETERMINANT, init, apply)
@@ -300,8 +296,8 @@ def make_output_envelope() -> Envelope:
     """Initialise learnable parameters for output envelope."""
     del output_dims, hf  # unused
     return {
-        'pi': jnp.zeros(shape=[natom, 1]),
-        'sigma': jnp.tile(jnp.eye(ndim)[..., None, None], [1, 1, natom, 1])
+        'pi': jnp.zeros(shape=natom),
+        'sigma': jnp.tile(jnp.eye(ndim)[..., None], [1, 1, natom])
     }
 
   def apply(*, ae: jnp.ndarray, r_ae: jnp.ndarray, r_ee: jnp.ndarray,
@@ -309,16 +305,10 @@ def make_output_envelope() -> Envelope:
     """Fully anisotropic envelope, but only one output in log space."""
     del r_ae, r_ee  # unused
     # Should register KFAC tags and blocks.
-    # 3 x 3 x nion x 1
-    #sigma = jnp.expand_dims(sigma, -1)
-    # nele x nion x 3 x 1
-    ae_sigma = _apply_covariance(ae, sigma)
-    ae_sigma = curvature_tags_and_blocks.register_qmc(
-        ae_sigma, ae, sigma, type='full')
-    # nele x nion x 1
+    sigma = jnp.expand_dims(sigma, -1)
+    ae_sigma = jnp.squeeze(_apply_covariance(ae, sigma), axis=-1)
     r_ae_sigma = jnp.linalg.norm(ae_sigma, axis=2)
-    # nele --> 1
-    return jnp.sum(jnp.log(jnp.sum(jnp.exp(-r_ae_sigma + pi), axis=[1, 2])))
+    return jnp.sum(jnp.log(jnp.sum(jnp.exp(-r_ae_sigma + pi), axis=1)))
 
   return Envelope(EnvelopeType.POST_DETERMINANT, init, apply)
 
@@ -332,8 +322,8 @@ def make_exact_cusp_envelope(nspins: Tuple[int, int],
     """Initialise learnable parameters for the exact cusp envelope."""
     del output_dims, hf  # unused
     return {
-        'pi': jnp.zeros(shape=[natom, 1]),
-        'sigma': jnp.tile(jnp.eye(ndim)[..., None, None], [1, 1, natom, 1])
+        'pi': jnp.zeros(shape=natom),
+        'sigma': jnp.tile(jnp.eye(ndim)[..., None], [1, 1, natom])
     }
 
   def apply(*, ae: jnp.ndarray, r_ae: jnp.ndarray, r_ee: jnp.ndarray,
@@ -342,19 +332,13 @@ def make_exact_cusp_envelope(nspins: Tuple[int, int],
     # No cusp at zero
     del r_ae  # unused
     # Should register KFAC tags and blocks.
-    # nele x nion x 3 x 1
-    ae_sigma = _apply_covariance(ae, sigma)
-    ae_sigma = curvature_tags_and_blocks.register_qmc(
-        ae_sigma, ae, sigma, type='full')
-    # nele x nion x 1, sqrt(1+r_ij^2)
+    sigma = jnp.expand_dims(sigma, -1)
+    ae_sigma = jnp.squeeze(_apply_covariance(ae, sigma), axis=-1)
     soft_r_ae = jnp.sqrt(jnp.sum(1. + ae_sigma**2, axis=2))
-    # nele --> 1
-    env = jnp.sum(jnp.log(jnp.sum(jnp.exp(-soft_r_ae + pi), axis=[1, 2])))
+    env = jnp.sum(jnp.log(jnp.sum(jnp.exp(-soft_r_ae + pi), axis=1)))
 
     # atomic cusp
-    # nele x nion
     r_ae = jnp.linalg.norm(ae, axis=2)
-    # 1
     a_cusp = jnp.sum(charges / (1. + r_ae))
 
     # electronic cusp

@@ -22,6 +22,7 @@ import jax
 from jax import lax
 import jax.numpy as jnp
 from typing_extensions import Protocol
+from ferminet.cmplx import hamiltonian as cmplx_h
 
 
 class LocalEnergy(Protocol):
@@ -150,7 +151,9 @@ def local_energy(f: networks.FermiNetLike,
                  atoms: jnp.ndarray,
                  charges: jnp.ndarray,
                  nspins: Sequence[int],
-                 use_scan: bool = False) -> LocalEnergy:
+                 use_scan: bool = False,
+                 do_complex: bool = False,
+) -> LocalEnergy:
   """Creates the function to evaluate the local energy.
 
   Args:
@@ -167,8 +170,13 @@ def local_energy(f: networks.FermiNetLike,
     and a single MCMC configuration in data.
   """
   del nspins
-  log_abs_f = lambda *args, **kwargs: f(*args, **kwargs)[1]
-  ke = local_kinetic_energy(log_abs_f, use_scan=use_scan)
+  # log_abs_f = lambda *args, **kwargs: f(*args, **kwargs)[1]
+  # already take the value of the network
+  log_abs_f = f
+  if do_complex:
+    ke = cmplx_h.local_kinetic_energy(log_abs_f)
+  else:
+    ke = local_kinetic_energy(log_abs_f, use_scan=use_scan)
 
   def _e_l(params: networks.ParamTree, key: chex.PRNGKey,
            data: jnp.ndarray) -> jnp.ndarray:
