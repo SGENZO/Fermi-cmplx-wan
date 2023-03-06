@@ -48,29 +48,34 @@ class InitFermiNet(Protocol):
       key: RNG state
     """
 
-
+""" 这里的和logferminetLike 输入增加时间变量t"""
 class FermiNetLike(Protocol):
 
   def __call__(self, params: ParamTree,
-               electrons: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray]:
+               electrons: jnp.ndarray,
+               time: jnp.float_) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """Returns the sign and log magnitude of the wavefunction.
 
     Args:
       params: network parameters.
       electrons: electron positions, shape (nelectrons*ndim), where ndim is the
         dimensionality of the system.
+      time: 时间变量t
     """
 
 
 class LogFermiNetLike(Protocol):
 
-  def __call__(self, params: ParamTree, electrons: jnp.ndarray) -> jnp.ndarray:
+  def __call__(self, params: ParamTree,
+               electrons: jnp.ndarray,
+               time: jnp.float_) -> jnp.ndarray:
     """Returns the log magnitude of the wavefunction.
 
     Args:
       params: network parameters.
       electrons: electron positions, shape (nelectrons*ndim), where ndim is the
         dimensionality of the system.
+      time: 时间变量t
     """
 
 ## Interfaces (network components) ##
@@ -93,10 +98,12 @@ class FeatureApply(Protocol):
 
   def __call__(self, ae: jnp.ndarray, r_ae: jnp.ndarray, ee: jnp.ndarray,
                r_ee: jnp.ndarray,
+               time: jnp.float_,
                **params: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """Creates the features to pass into the network.
 
     Args:
+      time: 时间变量t，一维标量。
       ae: electron-atom vectors. Shape: (nelectron, natom, 3).
       r_ae: electron-atom distances. Shape: (nelectron, natom, 1).
       ee: electron-electron vectors. Shape: (nelectron, nelectron, 3).
@@ -124,13 +131,15 @@ class ModelInit(Protocol):
 
 class ModelApply(Protocol):
 
-  def __call__(self, 
+  def __call__(self,
                Params,
-               ae: jnp.ndarray, 
-               ee: jnp.ndarray) -> jnp.ndarray:
+               ae: jnp.ndarray,
+               ee: jnp.ndarray,
+               time: jnp.float_) -> jnp.ndarray:
     """Creates the model to pass into the network.
 
     Args:
+      time:
       params: learnable model parameters
       ae: electron-atom vectors. Shape: (nelectron, natom, x).
       ee: electron-electron vectors. Shape: (nelectron, nelectron, x).
@@ -153,10 +162,12 @@ class MakeFeatureLayer(Protocol):
                charges: jnp.ndarray,
                nspins: Sequence[int],
                ndim: int,
+               time: jnp.float_,
                **kwargs: Any) -> FeatureLayer:
     """Builds the FeatureLayer object.
 
     Args:
+      time:
       charges: (natom) array of atom nuclear charges.
       nspins: tuple of the number of spin-up and spin-down electrons.
       ndim: dimension of the system.
@@ -189,6 +200,7 @@ class FermiNetOptions:
     envelope: Envelope object to create and apply the multiplicative envelope.
     feature_layer: Feature object to create and apply the input features for the
       one- and two-electron layers.
+    time_steps: 将时间区间分割成多少个片段
   """
   ndim: int = 3
   hidden_dims: FermiLayers = ((256, 32), (256, 32), (256, 32), (256, 32))
@@ -209,6 +221,7 @@ class FermiNetOptions:
   lattice : jnp.array = None
   det_nlayer : int = None
   do_complex : bool = False
+  time_steps: int = 10
 
 ## Network initialisation ##
 

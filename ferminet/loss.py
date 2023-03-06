@@ -42,20 +42,27 @@ class LossFn(Protocol):
 
   def __call__(
       self,
-      params: networks.ParamTree,
-      key: chex.PRNGKey,
-      data: jnp.ndarray,
+      params_trial: networks.ParamTree,
+      params_wave: networks.ParamTree,
+      key_trial: chex.PRNGKey,
+      key_wave: chex.PRNGKey,
+      data_trial: jnp.ndarray,
+      data_wave: jnp.ndarray,
   ) -> Tuple[jnp.ndarray, AuxiliaryLossData]:
-    """Evaluates the total energy of the network for a batch of configurations.
+    """描述弱形式下优化问题的目标，详见文件weak form。
+    这行不用看了 Evaluates the total energy of the network for a batch of configurations.
 
     Note: the signature of this function is fixed to match that expected by
     kfac_jax.optimizer.Optimizer with value_func_has_rng=True and
     value_func_has_aux=True.
 
     Args:
-      params: parameters to pass to the network.
-      key: PRNG state.
-      data: Batched electron positions to pass to the network.
+      params_trial: 传给试探函数网络的参数。
+      params_wave: 传给目标解的网络的参数。
+      key_trial: psi网络的PRNG state.
+      key_wave: phi网络的PRNG state.
+      data_trial: Batched electron positions to pass to the network.
+      data_wave:
 
     Returns:
       (loss, aux_data), where loss is the mean energy, and aux_data is an
@@ -65,9 +72,12 @@ class LossFn(Protocol):
     """
 
 
-def make_loss(network: networks.LogFermiNetLike,
-              local_energy: hamiltonian.LocalEnergy,
-              clip_local_energy: float = 0.0) -> LossFn:
+def make_loss(network_trial: networks.LogFermiNetLike,
+              network_wave: networks.LogFermiNetLike,
+              local_energy_trial: hamiltonian.LocalEnergy,
+              local_energy_wave: hamiltonian.LocalEnergy,
+              clip_local_energy_trial: float = 0.0,
+              clip_local_energy_wave: float = 0.0) -> LossFn:
   """Creates the loss function, including custom gradients.
 
   Args:
@@ -86,14 +96,19 @@ def make_loss(network: networks.LogFermiNetLike,
     loss is the mean energy, and aux_data is an AuxiliaryLossDataobject. The
     loss is averaged over the batch and over all devices inside a pmap.
   """
-  batch_local_energy = jax.vmap(local_energy, in_axes=(None, 0, 0), out_axes=0)
-  batch_network = jax.vmap(network, in_axes=(None, 0), out_axes=0)
+  batch_local_energy_trial = jax.vmap(local_energy_trial, in_axes=(None, 0, 0), out_axes=0)
+  batch_local_energy_wave = jax.vmap(local_energy_wave, in_axes=(None, 0, 0), out_axes=0)
+  batch_network_trial = jax.vmap(network_trial, in_axes=(None, 0), out_axes=0)
+  batch_network_wave = jax.vmap(network_wave, in_axes=(None, 0), out_axes=0)
 
   @jax.custom_jvp
   def total_energy(
-      params: networks.ParamTree,
-      key: chex.PRNGKey,
-      data: jnp.ndarray,
+      params_trial: networks.ParamTree,
+      params_wave: networks.ParamTree,
+      key_trial: chex.PRNGKey,
+      key_wave: chex.PRNGKey,
+      data_trial: jnp.ndarray,
+      data_wave: jnp.ndarray,
   ) -> Tuple[jnp.ndarray, AuxiliaryLossData]:
     """Evaluates the total energy of the network for a batch of configurations.
 
@@ -112,8 +127,15 @@ def make_loss(network: networks.LogFermiNetLike,
       local energy per MCMC configuration. The loss and variance are averaged
       over the batch and over all devices inside a pmap.
     """
-    keys = jax.random.split(key, num=data.shape[0])
-    e_l = batch_local_energy(params, keys, data)
+    keys_trial = jax.random.split(key_trial, num=data_trial.shape[0])
+    keys_wave = jax.random.split(key_wave, num=data_wave.shape[0])
+    e_l_trial = batch_local_energy_trial(params_trial, keys_trial, data_trial)
+    e_l_wave = batch_local_energy_wave(params_wave, keys_wave, data_wave)
+
+    E_pt_1 = constants.pmean(jnp.mean(e_l_tr))
+
+
+
     loss = constants.pmean(jnp.mean(e_l))
     variance = constants.pmean(jnp.mean((e_l - loss)**2))
     return loss, AuxiliaryLossData(variance=variance, local_energy=e_l)
