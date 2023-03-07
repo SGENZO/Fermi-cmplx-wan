@@ -380,6 +380,7 @@ def init_to_hf_solution(
     orbital_layer[i]['w'] = w
   return single_layers, orbital_layer
 
+# init_to_hf_solution 没有进行时间变量t的更改，如果报错可能需要考虑一下
 
 def init_fermi_net_params(
     key: chex.PRNGKey,
@@ -543,7 +544,7 @@ def construct_input_features(
 
   return ae, ee, r_ae, r_ee[..., None]
 
-
+#这里面的apply进行了输入数据的concat，时间t可以从这里concat
 def make_ferminet_features(charges: Optional[jnp.ndarray] = None,
                            nspins: Optional[Tuple[int, ...]] = None,
                            ndim: int = 3) -> FeatureLayer:
@@ -562,7 +563,7 @@ def make_ferminet_features(charges: Optional[jnp.ndarray] = None,
 
   return FeatureLayer(init=init, apply=apply)
 
-
+#这里面有backflow结构，每个layer里面都要concat一下时间
 def construct_symmetric_features(h_one: jnp.ndarray, h_two: jnp.ndarray,
                                  nspins: Tuple[int, int]) -> jnp.ndarray:
   """Combines intermediate features from rank-one and -two streams.
