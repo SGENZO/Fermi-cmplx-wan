@@ -24,7 +24,7 @@ import jax.numpy as jnp
 
 
 def array_partitions(sizes: Sequence[int]) -> Sequence[int]:
-  """Returns the indices for splitting an array into separate partitions.
+    """Returns the indices for splitting an array into separate partitions.
 
   Args:
     sizes: size of each of N partitions. The dimension of the array along
@@ -34,14 +34,14 @@ def array_partitions(sizes: Sequence[int]) -> Sequence[int]:
     sequence of indices (length len(sizes)-1) at which an array should be split
     to give the desired partitions.
   """
-  return list(itertools.accumulate(sizes))[:-1]
+    return list(itertools.accumulate(sizes))[:-1]
 
 
 def init_linear_layer(key: chex.PRNGKey,
                       in_dim: int,
                       out_dim: int,
                       include_bias: bool = True) -> Mapping[str, jnp.ndarray]:
-  """Initialises parameters for a linear layer, x w + b.
+    """Initialises parameters for a linear layer, x w + b.
 
   Args:
     key: JAX PRNG state.
@@ -53,21 +53,21 @@ def init_linear_layer(key: chex.PRNGKey,
     A mapping containing the weight matrix (key 'w') and, if required, bias
     unit (key 'b').
   """
-  key1, key2 = jax.random.split(key)
-  weight = (
-      jax.random.normal(key1, shape=(in_dim, out_dim)) /
-      jnp.sqrt(float(in_dim)))
-  if include_bias:
-    bias = jax.random.normal(key2, shape=(out_dim,))
-    return {'w': weight, 'b': bias}
-  else:
-    return {'w': weight}
+    key1, key2 = jax.random.split(key)
+    weight = (
+            jax.random.normal(key1, shape=(in_dim, out_dim)) /
+            jnp.sqrt(float(in_dim)))
+    if include_bias:
+        bias = jax.random.normal(key2, shape=(out_dim,))
+        return {'w': weight, 'b': bias}
+    else:
+        return {'w': weight}
 
 
 def linear_layer(x: jnp.ndarray,
                  w: jnp.ndarray,
                  b: Optional[jnp.ndarray] = None) -> jnp.ndarray:
-  """Evaluates a linear layer, x w + b.
+    """Evaluates a linear layer, x w + b.
 
   Args:
     x: inputs.
@@ -77,14 +77,15 @@ def linear_layer(x: jnp.ndarray,
   Returns:
     x w + b if b is given, x w otherwise.
   """
-  y = jnp.dot(x, w)
-  return y + b if b is not None else y
+    y = jnp.dot(x, w)
+    return y + b if b is not None else y
+
 
 vmap_linear_layer = jax.vmap(linear_layer, in_axes=(0, None, None), out_axes=0)
 
 
 def slogdet(x):
-  """Computes sign and log of determinants of matrices.
+    """Computes sign and log of determinants of matrices.
 
   This is a jnp.linalg.slogdet with a special (fast) path for small matrices.
 
@@ -94,24 +95,25 @@ def slogdet(x):
   Returns:
     sign, (natural) logarithm of the determinant of x.
   """
-  if x.shape[-1] == 1:
-    sign = jnp.sign(x[..., 0, 0])
-    logdet = jnp.log(jnp.abs(x[..., 0, 0]))
-  else:
-    sign, logdet = jnp.linalg.slogdet(x)
+    if x.shape[-1] == 1:
+        sign = jnp.sign(x[..., 0, 0])
+        logdet = jnp.log(jnp.abs(x[..., 0, 0]))
+    else:
+        sign, logdet = jnp.linalg.slogdet(x)
 
-  return sign, logdet
+    return sign, logdet
 
 
 def logdet_matmul(xs: Sequence[jnp.ndarray],
                   w: Optional[jnp.ndarray] = None,
                   do_complex: bool = False,
-) -> jnp.ndarray:
-  """Combines determinants and takes dot product with weights in log-domain.
+                  ) -> jnp.ndarray:
+    """Combines determinants and takes dot product with weights in log-domain.
 
   We use the log-sum-exp trick to reduce numerical instabilities.
 
   Args:
+    do_complex:
     xs: FermiNet orbitals in each determinant. Either of length 1 with shape
       (ndet, nelectron, nelectron) (full_det=True) or length 2 with shapes
       (ndet, nalpha, nalpha) and (ndet, nbeta, nbeta) (full_det=False,
@@ -123,38 +125,38 @@ def logdet_matmul(xs: Sequence[jnp.ndarray],
     determinant (or product of the i-th determinant in each spin channel, if
     full_det is not used).
   """
-  # 1x1 determinants appear to be numerically sensitive and can become 0
-  # (especially when multiple determinants are used with the spin-factored
-  # wavefunction). Avoid this by not going into the log domain for 1x1 matrices.
-  # Pass initial value to functools so det1d = 1 if all matrices are larger than
-  # 1x1.
-  det1d = functools.reduce(lambda a, b: a * b,
-                           [x.reshape(-1) for x in xs if x.shape[-1] == 1], 1)
-  # Pass initial value to functools so sign_in = 1, logdet = 0 if all matrices
-  # are 1x1.
-  sign_in, logdet = functools.reduce(
-      lambda a, b: (a[0] * b[0], a[1] + b[1]),
-      [slogdet(x) for x in xs if x.shape[-1] > 1], (1, 0))
+    # 1x1 determinants appear to be numerically sensitive and can become 0
+    # (especially when multiple determinants are used with the spin-factored
+    # wavefunction). Avoid this by not going into the log domain for 1x1 matrices.
+    # Pass initial value to functools so det1d = 1 if all matrices are larger than
+    # 1x1.
+    det1d = functools.reduce(lambda a, b: a * b,
+                             [x.reshape(-1) for x in xs if x.shape[-1] == 1], 1)
+    # Pass initial value to functools so sign_in = 1, logdet = 0 if all matrices
+    # are 1x1.
+    sign_in, logdet = functools.reduce(
+        lambda a, b: (a[0] * b[0], a[1] + b[1]),
+        [slogdet(x) for x in xs if x.shape[-1] > 1], (1, 0))
 
-  # log-sum-exp trick
-  maxlogdet = jnp.max(logdet)
-  det = sign_in * det1d * jnp.exp(logdet - maxlogdet)
-  if w is None:
-    result = jnp.sum(det)
-  else:
-    if isinstance(w, list):
-      for i in range(len(w)):
-        if i != len(w)-1:
-          det_next = jnp.tanh(linear_layer(det, **w[i]))
-        else:
-          det_next = linear_layer(det, **w[i])
-        det = 1./jnp.sqrt(2.) * (det + det_next)
-      result = jnp.sum(det)
+    # log-sum-exp trick
+    maxlogdet = jnp.max(logdet)
+    det = sign_in * det1d * jnp.exp(logdet - maxlogdet)
+    if w is None:
+        result = jnp.sum(det)
     else:
-      result = jnp.matmul(det, w)[0]
-  if not do_complex:
-    sign_out = jnp.sign(result)
-  else:
-    sign_out = jnp.exp(1j * jnp.angle(result))
-  log_out = jnp.log(jnp.abs(result)) + maxlogdet
-  return sign_out, log_out
+        if isinstance(w, list):
+            for i in range(len(w)):
+                if i != len(w) - 1:
+                    det_next = jnp.tanh(linear_layer(det, **w[i]))
+                else:
+                    det_next = linear_layer(det, **w[i])
+                det = 1. / jnp.sqrt(2.) * (det + det_next)
+            result = jnp.sum(det)
+        else:
+            result = jnp.matmul(det, w)[0]
+    if not do_complex:
+        sign_out = jnp.sign(result)
+    else:
+        sign_out = jnp.exp(1j * jnp.angle(result))
+    log_out = jnp.log(jnp.abs(result)) + maxlogdet
+    return sign_out, log_out
