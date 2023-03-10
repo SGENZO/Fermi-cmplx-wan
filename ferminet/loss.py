@@ -75,8 +75,8 @@ class LossFn(Protocol):
 
 def make_loss(network_trial: networks.LogFermiNetLike,
               network_wave: networks.LogFermiNetLike,
-              local_energy_trial: hamiltonian.LocalEnergy,
-              local_energy_wave: hamiltonian.LocalEnergy,
+              local_energy_trial: hamiltonian.MomentLocalEnergy,
+              local_energy_wave: hamiltonian.MomentLocalEnergy,
               clip_local_energy_trial: float = 0.0,
               clip_local_energy_wave: float = 0.0) -> LossFn:
     """Creates the loss function, including custom gradients.

@@ -50,7 +50,7 @@ class InitFermiNet(Protocol):
     """
 
 
-# 这里的和LogFermiNetLike 输入增加时间变量t #
+# 这里的和FermiNetLike 输入增加时间变量t #
 class FermiNetLike(Protocol):
 
     def __call__(self, params: ParamTree,
@@ -515,19 +515,22 @@ def construct_input_features(
 
 Args:
   lattice: pbc时用的格点
-  pos_: electron positions. Shape (nelectrons*ndim,).
-  atoms: atom positions. Shape (natoms, ndim).
+  pos_: electron positions. Shape (nelectrons, ndim,).改成(nelectrons, ndim, ntimestep).
+  atoms: atom positions. Shape (natoms, ndim). 这里假设了atoms不随时间变化.
+  ntimestep: 时间网格个数
   ndim: dimension of system. Change only with caution.
 
   Returns:
     ae, ee, r_ae, r_ee tuple, where:
-      ae: atom-electron vector. Shape (nelectron, natom, ndim).
-      ee: atom-electron vector. Shape (nelectron, nelectron, ndim).
-      r_ae: atom-electron distance. Shape (nelectron, natom, 1).
-      r_ee: electron-electron distance. Shape (nelectron, nelectron, 1).
+      ae: atom-electron vector. Shape (nelectron, natom, ndim, ntimestep).
+      ee: atom-electron vector. Shape (nelectron, nelectron, ndim, ntimestep).
+      r_ae: atom-electron distance. Shape (nelectron, natom, 1, ntimestep).
+      r_ee: electron-electron distance. Shape (nelectron, nelectron, 1, ntimestep).
     The diagonal terms in r_ee are masked out such that the gradients of these
     terms are also zero.
   """
+    ntimestep = pos_.shape[2]
+
     if lattice is not None:
         rec_lattice = jnp.linalg.inv(lattice)
         pos = dp.apply_pbc(pos_, lattice, rec_lattice)
@@ -535,8 +538,8 @@ Args:
         pos = pos_
 
     assert atoms.shape[1] == ndim
-    ae = jnp.reshape(pos, [-1, 1, ndim]) - atoms[None, ...]
-    ee = jnp.reshape(pos, [1, -1, ndim]) - jnp.reshape(pos, [-1, 1, ndim])
+    ae = jnp.reshape(pos, [-1, 1, ndim, ntimestep]) - atoms[None, ..., None]
+    ee = jnp.reshape(pos, [1, -1, ndim, ntimestep]) - jnp.reshape(pos, [-1, 1, ndim, ntimestep])
 
     def diff_pbc(vr):
         return dp.apply_nearest_neighbor(vr, lattice, rec_lattice)
@@ -548,13 +551,20 @@ Args:
     r_ae = jnp.linalg.norm(ae, axis=2, keepdims=True)
     # Avoid computing the norm of zero, as is has undefined grad
     n = ee.shape[0]
-    r_ee = (
-            jnp.linalg.norm(ee + jnp.eye(n)[..., None], axis=-1) * (1.0 - jnp.eye(n)))
 
-    return ae, ee, r_ae, r_ee[..., None]
+    def r_for_notime(x):
+        result = (jnp.linalg.norm(x + jnp.eye(n)[..., None], axis=-1) * (1.0 - jnp.eye(n)))
+        return result[..., None]
+
+    r_ee = jax.vmap(r_for_notime, in_axes=-1, out_axes=-1)(ee)
+
+    return ae, ee, r_ae, r_ee
 
 
-# 这里面的apply进行了输入数据的concat，时间t可以从这里concat
+# 对construct_input_features加入了变量ntimestep, data也增加了time维度，最终输出的结果都在最后加入了time维度。
+# 不需要增加输入，ntimestep可以通过检测data的最后一个维度得到
+
+
 def make_ferminet_features(charges: Optional[jnp.ndarray] = None,
                            nspins: Optional[Tuple[int, ...]] = None,
                            ndim: int = 3) -> FeatureLayer:
@@ -573,6 +583,8 @@ def make_ferminet_features(charges: Optional[jnp.ndarray] = None,
 
     return FeatureLayer(init=init, apply=apply)
 
+
+# 这里面的apply进行了输入数据的concat，时间t可以从这里concat
 
 # 这里面有backflow结构，每个layer里面都要concat一下时间
 def construct_symmetric_features(h_one: jnp.ndarray, h_two: jnp.ndarray,

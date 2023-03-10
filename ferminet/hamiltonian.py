@@ -76,14 +76,15 @@ def local_kinetic_energy(
     -1/2f \nabla^2 f = -1/2 (\nabla^2 log|f| + (\nabla log|f|)^2).
   """
 
-    def _lapl_over_f(params, data, moment):
+    def _lapl_over_f(params, data):
         n = data.shape[0]
         eye = jnp.eye(n)
         grad_f = jax.grad(f, argnums=1)
-        grad_f_closure = lambda x: grad_f(params, x, moment)
+        grad_f_closure = lambda x: grad_f(params, x)
         primal, dgrad_f = jax.linearize(grad_f_closure, data)
         # 这里的f是LogFermiNetLike(Params, electrons, time) -> log magnitude of function f
         # grad_f是对electrons求的，用closure完成对参数params和时刻moment的固定
+        # 因为data最后一个维度是ntimestep，所以在laplacian外面直接用vmap
 
         if use_scan:
             _, diagonal = lax.scan(
@@ -94,19 +95,31 @@ def local_kinetic_energy(
                 0, n, lambda i, val: val + dgrad_f(eye[i])[i], 0.0)
         return result - 0.5 * jnp.sum(primal ** 2)
 
-    return _lapl_over_f
-# 完成时刻t的增加
+    _lapl_over_f_vmap = jax.vmap(_lapl_over_f, in_axes=(None, -1), out_axes=-1)
+
+    return _lapl_over_f_vmap
+
+
+# 利用vmap完成对data的ntimestep部分的批操作
 
 
 def potential_electron_electron(r_ee: jnp.ndarray) -> jnp.ndarray:
     """Returns the electron-electron potential.
 
   Args:
-    r_ee: Shape (neletrons, nelectrons, :). r_ee[i,j,0] gives the distance
-      between electrons i and j. Other elements in the final axes are not
+    r_ee: Shape (neletrons, nelectrons, :, ntimestep). r_ee[i,j,0,t] gives the distance
+      between electrons i and j at time t. Other elements in the final axes are not
       required.
   """
-    return jnp.sum(jnp.triu(1 / r_ee[..., 0], k=1))
+
+    def pee_for_notime(x):
+        result = jnp.sum(jnp.triu(1 / x[..., 0], k=1))
+        return result
+
+    return jax.vmap(pee_for_notime, in_axes=-1, out_axes=-1)(r_ee)
+
+
+# 利用vmap完成对data的ntimestep部分的批操作
 
 
 def potential_electron_nuclear(charges: jnp.ndarray,
@@ -118,7 +131,15 @@ def potential_electron_nuclear(charges: jnp.ndarray,
     r_ae: Shape (nelectrons, natoms). r_ae[i, j] gives the distance between
       electron i and atom j.
   """
-    return -jnp.sum(charges / r_ae[..., 0])
+
+    def pen_for_time(x):
+        result = -jnp.sum(charges / x[..., 0])
+        return result
+
+    return jax.vmap(pen_for_time, in_axes=-1, out_axes=-1)(r_ae)
+
+
+# 利用vmap完成对data的ntimestep部分的批操作
 
 
 def potential_nuclear_nuclear(charges: jnp.ndarray,
@@ -132,6 +153,9 @@ def potential_nuclear_nuclear(charges: jnp.ndarray,
     r_aa = jnp.linalg.norm(atoms[None, ...] - atoms[:, None], axis=-1)
     return jnp.sum(
         jnp.triu((charges[None, ...] * charges[..., None]) / r_aa, k=1))
+
+
+# 这个是对atom的操作，不需要对时间批处理，需要扩充时间维度
 
 
 def potential_energy(r_ae: jnp.ndarray, r_ee: jnp.ndarray, atoms: jnp.ndarray,
@@ -149,7 +173,10 @@ def potential_energy(r_ae: jnp.ndarray, r_ee: jnp.ndarray, atoms: jnp.ndarray,
   """
     return (potential_electron_electron(r_ee) +
             potential_electron_nuclear(charges, r_ae) +
-            potential_nuclear_nuclear(charges, atoms))
+            potential_nuclear_nuclear(charges, atoms)[..., None])
+
+
+# pnn的时间维度，在此处扩充，应该是复制了ntimestep份
 
 
 def local_energy(f: networks.FermiNetLike,
@@ -159,7 +186,7 @@ def local_energy(f: networks.FermiNetLike,
                  use_scan: bool = False,
                  do_complex: bool = False,
                  ) -> MomentLocalEnergy:
-    """Creates the function to evaluate the local energy.
+    """Creates the function to evaluate the local energy.维度是(ntimestep)
 
   Args:
     f: Callable which returns the sign and log of the magnitude of the
@@ -176,9 +203,9 @@ def local_energy(f: networks.FermiNetLike,
     and a single MCMC configuration in data.
   """
     del nspins
-    # log_abs_f = lambda *args, **kwargs: f(*args, **kwargs)[1]
+    log_abs_f = lambda *args, **kwargs: f(*args, **kwargs)[1]
     # already take the value of the network
-    log_abs_f = f
+    # log_abs_f = f
     if do_complex:
         ke = cmplx_h.local_kinetic_energy(log_abs_f)
     else:
@@ -200,3 +227,4 @@ def local_energy(f: networks.FermiNetLike,
         return potential + kinetic
 
     return _e_l
+# 对时间的数据维度怎么办
