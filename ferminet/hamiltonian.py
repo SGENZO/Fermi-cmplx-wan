@@ -227,4 +227,4 @@ def local_energy(f: networks.FermiNetLike,
         return potential + kinetic
 
     return _e_l
-# 对时间的数据维度怎么办
+# 返回的是维度为ntimestep的向量

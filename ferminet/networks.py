@@ -517,7 +517,6 @@ Args:
   lattice: pbc时用的格点
   pos_: electron positions. Shape (nelectrons, ndim,).改成(nelectrons, ndim, ntimestep).
   atoms: atom positions. Shape (natoms, ndim). 这里假设了atoms不随时间变化.
-  ntimestep: 时间网格个数
   ndim: dimension of system. Change only with caution.
 
   Returns:

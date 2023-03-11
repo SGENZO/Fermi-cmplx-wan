@@ -85,6 +85,7 @@ def make_loss(network_trial: networks.LogFermiNetLike,
     network_trial: callable which evaluates the log of the magnitude of the
       trial function(square root of the log probability distribution) at a
       single MCMC configuration given the network parameters.
+      注意这里传入的data是单mcmc configuration，也就是没有batch，需要vmap一下
     network_wave: callable which evaluates the log of the magnitude of the
       wavefunction (square root of the log probability distribution) at a
       single MCMC configuration given the network parameters.
@@ -107,9 +108,14 @@ def make_loss(network_trial: networks.LogFermiNetLike,
     loss is the mean energy, and aux_data is an AuxiliaryLossDataobject. The
     loss is averaged over the batch and over all devices inside a pmap.
   """
-    # local_energy的输入是(f: networks.FermiNetLike, atoms: jnp.ndarray, charges: jnp.ndarray). vmap
+    # local_energy的输入是networks.ParamTree, key: chex.PRNGKey, data: jnp.ndarray).
+    # data经过vmap后的维度是(nelectrons, ndim, ntimestep)，这里的vmap用于处理mcmc采样后的一堆batch的数据
+    # 新的输入维度为(batch, nelectrons, ndim, ntimestep)，输出为(batch, ntimestep)的local energy
     batch_local_energy_trial = jax.vmap(local_energy_trial, in_axes=(None, 0, 0), out_axes=0)
     batch_local_energy_wave = jax.vmap(local_energy_wave, in_axes=(None, 0, 0), out_axes=0)
+    # LofFermiNetLike为(self, params: ParamTree,
+    #                  electrons: jnp.ndarray,
+    #                  time: jnp.float_) -> jnp.ndarray:
     batch_network_trial = jax.vmap(network_trial, in_axes=(None, 0), out_axes=0)
     batch_network_wave = jax.vmap(network_wave, in_axes=(None, 0), out_axes=0)
 
@@ -146,6 +152,11 @@ def make_loss(network_trial: networks.LogFermiNetLike,
     """
         keys_trial = jax.random.split(key_trial, num=data_trial.shape[0])
         keys_wave = jax.random.split(key_wave, num=data_wave.shape[0])
+
+
+
+
+
         e_l_trial = batch_local_energy_trial(params_trial, keys_trial, data_trial)
         e_l_wave = batch_local_energy_wave(params_wave, keys_wave, data_wave)
 
