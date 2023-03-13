@@ -48,6 +48,7 @@ class LossFn(Protocol):
             key_wave: chex.PRNGKey,
             data_trial: jnp.ndarray,
             data_wave: jnp.ndarray,
+            time: jnp.float_,
     ) -> Tuple[jnp.ndarray, AuxiliaryLossData]:
         """描述弱形式下优化问题的目标，详见文件weak form。
     这行不用看了 Evaluates the total energy of the network for a batch of configurations.
@@ -70,6 +71,8 @@ class LossFn(Protocol):
       local energy per MCMC configuration. The loss and variance are averaged
       over the batch and over all devices inside a pmap.
     """
+
+
 # 这里的return是不是需要对trial和wave分别给一个返回值？
 
 
@@ -77,8 +80,7 @@ def make_loss(network_trial: networks.LogFermiNetLike,
               network_wave: networks.LogFermiNetLike,
               local_energy_trial: hamiltonian.MomentLocalEnergy,
               local_energy_wave: hamiltonian.MomentLocalEnergy,
-              clip_local_energy_trial: float = 0.0,
-              clip_local_energy_wave: float = 0.0) -> LossFn:
+              clip_local_energy: float = 0.0) -> LossFn:
     """Creates the loss function, including custom gradients.
 
   Args:
@@ -93,8 +95,8 @@ def make_loss(network_trial: networks.LogFermiNetLike,
       trial function.
     local_energy_wave: callable which evaluates the local energy of the
       wavefunction.
-    clip_local_energy_trial: clip local energy for trial function.
-    clip_local_energy_wave: clip local energy for wavefunction.
+    clip_local_energy: clip local energy for trial function.
+    # clip_local_energy_wave: clip local energy for wavefunction.
 
     For clip local energy. If greater than zero, clip local energies that are
       outside [E_L - n D, E_L + n D], where E_L is the mean local energy, n is
@@ -113,11 +115,35 @@ def make_loss(network_trial: networks.LogFermiNetLike,
     # 新的输入维度为(batch, nelectrons, ndim, ntimestep)，输出为(batch, ntimestep)的local energy
     batch_local_energy_trial = jax.vmap(local_energy_trial, in_axes=(None, 0, 0), out_axes=0)
     batch_local_energy_wave = jax.vmap(local_energy_wave, in_axes=(None, 0, 0), out_axes=0)
-    # LofFermiNetLike为(self, params: ParamTree,
+
+    # LogFermiNetLike为(self, params: ParamTree,
     #                  electrons: jnp.ndarray,
     #                  time: jnp.float_) -> jnp.ndarray:
-    batch_network_trial = jax.vmap(network_trial, in_axes=(None, 0), out_axes=0)
-    batch_network_wave = jax.vmap(network_wave, in_axes=(None, 0), out_axes=0)
+    # 定义一个将LogFermiNetLike时间分割处理的新LogFermiNetLike
+    def slicetime_network(f: networks.LogFermiNetLike) -> networks.LogFermiNetLike:
+
+        def network_timestep(self, params: networks.ParamTree,
+                             electrons: jnp.ndarray,
+                             time: jnp.float_) -> jnp.ndarray:
+            timestep = electrons.shape[-1]
+            f_closure = lambda x, y: f(self, params, x, y)
+            result = []
+            for i in range(timestep):
+                t = i * (time / (timestep - 1))
+                e = electrons[:, :, i]
+                result = jnp.append(result, [f_closure(e, t)])
+
+            result = result.jnp.asarray
+
+            return result
+
+        return network_timestep
+
+    network_trial_time = slicetime_network(network_trial)
+    network_wave_time = slicetime_network(network_wave)
+
+    batch_network_trial = jax.vmap(network_trial_time, in_axes=(None, 0, None), out_axes=0)
+    batch_network_wave = jax.vmap(network_wave_time, in_axes=(None, 0, None), out_axes=0)
 
     @jax.custom_jvp
     def total_energy(
@@ -127,6 +153,7 @@ def make_loss(network_trial: networks.LogFermiNetLike,
             key_wave: chex.PRNGKey,
             data_trial: jnp.ndarray,
             data_wave: jnp.ndarray,
+            time: jnp.float_,
     ) -> Tuple[jnp.ndarray, AuxiliaryLossData]:
         """Evaluates the total energy of the network for a batch of configurations.
 
@@ -143,6 +170,7 @@ def make_loss(network_trial: networks.LogFermiNetLike,
         the local energy function.
       data_wave: Batched MCMC configurations of the wavefunction to pass to
         the local energy function.
+      time:
 
     Returns:
       (loss, aux_data), where loss is the mean energy, and aux_data is an
@@ -153,25 +181,35 @@ def make_loss(network_trial: networks.LogFermiNetLike,
         keys_trial = jax.random.split(key_trial, num=data_trial.shape[0])
         keys_wave = jax.random.split(key_wave, num=data_wave.shape[0])
 
+        # 两个exp相除，是不是先对log的部分相减再exp更好？
+        p1 = (jax.grad(jnp.exp(batch_network_wave), argnums=2)(params_wave, data_trial, time)) / \
+             (jnp.exp(batch_network_trial(params_trial, data_trial, time)))
+        p2 = (jnp.exp(batch_network_wave(params_wave, data_trial, time))) / \
+             (jnp.exp(batch_network_trial(params_trial, data_trial, time))) * \
+             (batch_local_energy_wave(params_wave, keys_wave, data_trial))
+        p3 = (jnp.exp(batch_network_trial(params_trial, data_wave, time))) / \
+             (jnp.exp(batch_network_wave(params_wave, data_wave, time))) * \
+             (jnp.conjugate(jax.grad(batch_network_wave, argnums=2)(params_wave, data_wave, time)))
+        p4 = (jnp.exp(batch_network_trial(params_trial, data_wave, time))) / \
+             (jnp.exp(batch_network_wave(params_wave, data_wave, time))) * \
+             (batch_local_energy_trial(params_trial, keys_trial, data_wave))
 
-
-
-
-        e_l_trial = batch_local_energy_trial(params_trial, keys_trial, data_trial)
-        e_l_wave = batch_local_energy_wave(params_wave, keys_wave, data_wave)
-
-        E_pt_1 = constants.pmean(jnp.mean(e_l_tr))
-
+        # 这里jnp.mean求了对(batch, ntimestep)的平均值
+        e_l = (1j * p1 - p2) * (-1j * p3 - p4)
+        # pmean干什么用的，应该是对不同device的结果求mean
         loss = constants.pmean(jnp.mean(e_l))
+
+        # 对两组data算出来的东西，variance有意义吗？
         variance = constants.pmean(jnp.mean((e_l - loss) ** 2))
         return loss, AuxiliaryLossData(variance=variance, local_energy=e_l)
 
     @total_energy.defjvp
     def total_energy_jvp(primals, tangents):  # pylint: disable=unused-variable
         """Custom Jacobian-vector product for unbiased local energy gradients."""
-        params, key, data = primals
-        loss, aux_data = total_energy(params, key, data)
+        params_trial, params_wave, key_trial, key_wave, data_trial, data_wave, time = primals
+        loss, aux_data = total_energy(params_trial, params_wave, key_trial, key_wave, data_trial, data_wave, time)
 
+        # 这块不知道怎么改了
         if clip_local_energy > 0.0:
             # Try centering the window around the median instead of the mean?
             tv = jnp.mean(jnp.abs(aux_data.local_energy - loss))
