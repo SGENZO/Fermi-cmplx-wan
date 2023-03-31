@@ -135,7 +135,7 @@ def make_loss(network_trial: networks.LogFermiNetLike,
 
             result = result.jnp.asarray
 
-            return result
+            return resul t
 
         return network_timestep
 
@@ -203,6 +203,10 @@ def make_loss(network_trial: networks.LogFermiNetLike,
         variance = constants.pmean(jnp.mean((e_l - loss) ** 2))
         return loss, AuxiliaryLossData(variance=variance, local_energy=e_l)
 
+    total_energy_psi = lambda
+
+
+
     @total_energy.defjvp
     def total_energy_jvp(primals, tangents):  # pylint: disable=unused-variable
         """Custom Jacobian-vector product for unbiased local energy gradients."""
@@ -224,10 +228,17 @@ def make_loss(network_trial: networks.LogFermiNetLike,
         # (params, rng, data)) and Laplacian calculation (only want to take
         # Laplacian wrt electron positions) we need to change up the calling
         # convention between total_energy and batch_network
-        primals = primals[0], primals[2]
-        tangents = tangents[0], tangents[2]
-        psi_primal, psi_tangent = jax.jvp(batch_network, primals, tangents)
+        primals_trial = primals[0], primals[4]
+        primals_wave = primals[1], primals[5]
+        # primals需要的是params和data
+        tangents_trail = tangents[0], tangents[4]
+        tangents_wave = tangents[1], tangents[5]
+        # tangents的索引应该和primals对应
+        phi_primal, phi_tangent = jax.jvp(batch_network_trial, primals_trial, tangents_trail)
+        psi_primal, psi_tangent = jax.jvp(batch_network_wave, primals_wave, tangents_wave)
         kfac_jax.register_normal_predictive_distribution(psi_primal[:, None])
+        kfac_jax.register_normal_predictive_distribution(phi_primal[:, None])
+        # 这个的作用是？
         primals_out = loss, aux_data
         device_batch_size = jnp.shape(aux_data.local_energy)[0]
         tangents_out = (jnp.dot(psi_tangent, diff) / device_batch_size, aux_data)
