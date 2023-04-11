@@ -135,7 +135,7 @@ def make_loss(network_trial: networks.LogFermiNetLike,
 
             result = result.jnp.asarray
 
-            return resul t
+            return result
 
         return network_timestep
 
@@ -203,15 +203,15 @@ def make_loss(network_trial: networks.LogFermiNetLike,
         variance = constants.pmean(jnp.mean((e_l - loss) ** 2))
         return loss, AuxiliaryLossData(variance=variance, local_energy=e_l)
 
-    total_energy_psi = lambda
-
-
-
     @total_energy.defjvp
     def total_energy_jvp(primals, tangents):  # pylint: disable=unused-variable
         """Custom Jacobian-vector product for unbiased local energy gradients."""
         params_trial, params_wave, key_trial, key_wave, data_trial, data_wave, time = primals
         loss, aux_data = total_energy(params_trial, params_wave, key_trial, key_wave, data_trial, data_wave, time)
+        keys_trial = jax.random.split(key_trial, num=data_trial.shape[0])
+        keys_wave = jax.random.split(key_wave, num=data_wave.shape[0])
+        E_LT = batch_local_energy_trial(params_trial, keys_trial, data_wave)
+        E_LW = batch_local_energy_wave(params_wave, keys_wave, data_trial)
 
         # 这块不知道怎么改了
         if clip_local_energy > 0.0:
@@ -228,20 +228,41 @@ def make_loss(network_trial: networks.LogFermiNetLike,
         # (params, rng, data)) and Laplacian calculation (only want to take
         # Laplacian wrt electron positions) we need to change up the calling
         # convention between total_energy and batch_network
-        primals_trial = primals[0], primals[4]
-        primals_wave = primals[1], primals[5]
-        # primals需要的是params和data
-        tangents_trail = tangents[0], tangents[4]
-        tangents_wave = tangents[1], tangents[5]
+        primals_trial = primals[0], primals[4], primals[6]
+        primals_wave = primals[1], primals[5], primals[6]
+        # primals需要的是params和data,也需要t
+        tangents_trail = tangents[0], tangents[4], tangents[6]
+        tangents_wave = tangents[1], tangents[5], tangents[6]
         # tangents的索引应该和primals对应
         phi_primal, phi_tangent = jax.jvp(batch_network_trial, primals_trial, tangents_trail)
         psi_primal, psi_tangent = jax.jvp(batch_network_wave, primals_wave, tangents_wave)
+        psi_partial_t_primal, psi_partial_t_tangent = jax.jvp(jax.grad(batch_network_wave, argnums=2), primals_wave,
+                                                              tangents_wave)
+
         kfac_jax.register_normal_predictive_distribution(psi_primal[:, None])
         kfac_jax.register_normal_predictive_distribution(phi_primal[:, None])
-        # 这个的作用是？
+        # 这个的作用是？记录一个正态分布，后面做期望的时候怎么用呢
         primals_out = loss, aux_data
         device_batch_size = jnp.shape(aux_data.local_energy)[0]
-        tangents_out = (jnp.dot(psi_tangent, diff) / device_batch_size, aux_data)
+
+        P1 = 1j * jnp.conjugate(jnp.exp(phi_primal - psi_primal)) * \
+             (psi_partial_t_tangent + psi_partial_t_primal * psi_tangent) - \
+             jnp.conjugate(jnp.exp(phi_primal - psi_primal)) * jnp.conjugate(E_LT) * psi_tangent
+        P2 = 1j * jnp.conjugate(jnp.exp(phi_primal - psi_primal)) * psi_partial_t_primal - \
+             jnp.conjugate(jnp.exp(phi_primal - psi_primal)) * jnp.conjugate(E_LT)
+        P3 = jnp.conjugate(psi_tangent)
+        P4 = 1j * jnp.conjugate(phi_tangent) * jnp.exp(psi_primal - phi_primal) * psi_partial_t_primal - \
+             jnp.exp(psi_primal - phi_primal) * E_LW * jnp.conjugate(phi_tangent)
+        P5 = 1j * jnp.exp(psi_primal - phi_primal) * psi_partial_t_primal - \
+             jnp.exp(psi_primal - phi_primal) * E_LW
+        P6 = jnp.conjugate(phi_tangent)
+
+        psi_gradient = 2 * jnp.real(P5 * jnp.conjugate(P1)) - P5 * jnp.conjugate(P2) * 2 * jnp.real(P3)
+        phi_gradient = 2 * jnp.real(jnp.conjugate(P2) * P4) - P5 * jnp.conjugate(P2) * 2 * jnp.real(P6)
+
+        # 时间导数没有加进去
+        tangents_out = ((jnp.dot(phi_gradient, tangents[0]) + jnp.dot(psi_gradient, tangents[1])) / \
+                        device_batch_size, aux_data)
         return primals_out, tangents_out
 
     return total_energy
