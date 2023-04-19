@@ -408,7 +408,7 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
             cfg.network.use_last_layer,
         )
 
-    network_init, signed_network, network_options = networks.make_fermi_net(
+    network_psi_init, signed_network_psi, network_psi_options = networks.make_fermi_net(
         atoms,
         nspins,
         charges,
@@ -422,19 +422,50 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
         lattice=lattice,
         **cfg.network.detnet,
     )
+
+    network_phi_init, signed_network_phi, network_phi_options = networks.make_fermi_net(
+        atoms,
+        nspins,
+        charges,
+        envelope=envelope,
+        feature_layer=feature_layer,
+        ferminet_model=ferminet_model,
+        bias_orbitals=cfg.network.bias_orbitals,
+        use_last_layer=cfg.network.use_last_layer,
+        hf_solution=hf_solution,
+        full_det=cfg.network.full_det,
+        lattice=lattice,
+        **cfg.network.detnet,
+    )
+
     key, subkey = jax.random.split(key)
-    params = network_init(subkey)
-    params = kfac_jax.utils.replicate_all_local_devices(params)
+    params_psi = network_psi_init(subkey)
+    params_psi = kfac_jax.utils.replicate_all_local_devices(params_psi)
+
+    key, subkey = jax.random.split(key)
+    params_phi = network_phi_init(subkey)
+    params_phi = kfac_jax.utils.replicate_all_local_devices(params_phi)
+
     # Often just need log|psi(x)|.
-    abs_network = lambda *args, **kwargs: signed_network(*args, **kwargs)[1]  # type: networks.LogFermiNetLike
+    abs_network_psi = lambda *args, **kwargs: signed_network_psi(*args, **kwargs)[1]  # type: networks.LogFermiNetLike
     if cfg.network.detnet.do_complex:
-        network = make_cmplx_network(signed_network)
+        network_psi = make_cmplx_network(signed_network_psi)
     else:
-        network = abs_network
-    batch_network = jax.vmap(
-        network, in_axes=(None, 0), out_axes=0)  # batched network
-    batch_abs_network = jax.vmap(
-        abs_network, in_axes=(None, 0), out_axes=0)  # batched network
+        network_psi = abs_network_psi
+    batch_network_psi = jax.vmap(
+        network_psi, in_axes=(None, 0), out_axes=0)  # batched network
+    batch_abs_network_psi = jax.vmap(
+        abs_network_psi, in_axes=(None, 0), out_axes=0)  # batched network
+
+    abs_network_phi = lambda *args, **kwargs: signed_network_phi(*args, **kwargs)[1]  # type: networks.LogFermiNetLike
+    if cfg.network.detnet.do_complex:
+        network_phi = make_cmplx_network(signed_network_phi)
+    else:
+        network_phi = abs_network_phi
+    batch_network_phi = jax.vmap(
+        network_phi, in_axes=(None, 0), out_axes=0)  # batched network
+    batch_abs_network_phi = jax.vmap(
+        abs_network_phi, in_axes=(None, 0), out_axes=0)  # batched network
 
     # Set up checkpointing and restore params/data if necessary
     # Mirror behaviour of checkpoints in TF FermiNet.
