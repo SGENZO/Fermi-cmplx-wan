@@ -487,17 +487,32 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
             ckpt_restore_filename, host_batch_size)
     else:
         logging.info('No checkpoint found. Training new model.')
+        # make psi data
         key, subkey = jax.random.split(key)
         # make sure data on each host is initialized differently
         subkey = jax.random.fold_in(subkey, jax.process_index())
-        data = init_electrons(
+        data_psi = init_electrons(
             subkey,
             cfg.system.molecule,
             cfg.system.electrons,
             batch_size=host_batch_size,
             init_width=cfg.mcmc.init_width)
-        data = jnp.reshape(data, data_shape + data.shape[1:])
-        data = kfac_jax.utils.broadcast_all_local_devices(data)
+        data_psi = jnp.reshape(data_psi, data_shape + data_psi.shape[1:])
+        data_psi = kfac_jax.utils.broadcast_all_local_devices(data_psi)
+        t_init = 0
+        opt_state_ckpt = None
+        mcmc_width_ckpt = None
+        # make phi data
+        key, subkey = jax.random.split(key)
+        subkey = jax.random.fold_in(subkey, jax.process_index())
+        data_phi = init_electrons(
+            subkey,
+            cfg.system.molecule,
+            cfg.system.electrons,
+            batch_size=host_batch_size,
+            init_width=cfg.mcmc.init_width)
+        data_phi = jnp.reshape(data_phi, data_shape + data_phi.shape[1:])
+        data_phi = kfac_jax.utils.broadcast_all_local_devices(data_phi)
         t_init = 0
         opt_state_ckpt = None
         mcmc_width_ckpt = None
@@ -513,23 +528,45 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
 
     if (t_init == 0 and cfg.pretrain.method == 'hf' and
             cfg.pretrain.iterations > 0):
-        orbitals = functools.partial(
+        orbitals_psi = functools.partial(
             networks.fermi_net_orbitals,
             atoms=atoms,
             nspins=cfg.system.electrons,
-            options=network_options,
+            options=network_psi_options,
         )
-        batch_orbitals = jax.vmap(
-            lambda params, data: orbitals(params, data)[0],
+        orbitals_phi = functools.partial(
+            networks.fermi_net_orbitals,
+            atoms=atoms,
+            nspins=cfg.system.electrons,
+            options=network_phi_options,
+        )
+        batch_orbitals_psi = jax.vmap(
+            lambda params, data: orbitals_psi(params, data)[0],
+            in_axes=(None, 0),
+            out_axes=0)
+        batch_orbitals_phi = jax.vmap(
+            lambda params, data: orbitals_phi(params, data)[0],
             in_axes=(None, 0),
             out_axes=0)
         sharded_key, subkeys = kfac_jax.utils.p_split(sharded_key)
-        params, data = pretrain.pretrain_hartree_fock(
-            params=params,
-            data=data,
-            batch_network=batch_network,
-            batch_orbitals=batch_orbitals,
-            network_options=network_options,
+        params_psi, data_psi = pretrain.pretrain_hartree_fock(
+            params=params_psi,
+            data=data_psi,
+            batch_network=batch_network_psi,
+            batch_orbitals=batch_orbitals_psi,
+            network_options=network_psi_options,
+            sharded_key=subkeys,
+            atoms=atoms,
+            electrons=cfg.system.electrons,
+            scf_approx=hartree_fock,
+            iterations=cfg.pretrain.iterations)
+        sharded_key, subkeys = kfac_jax.utils.p_split(sharded_key)
+        params_phi, data_phi = pretrain.pretrain_hartree_fock(
+            params=params_phi,
+            data=data_phi,
+            batch_network=batch_network_phi,
+            batch_orbitals=batch_orbitals_phi,
+            network_options=network_phi_options,
             sharded_key=subkeys,
             atoms=atoms,
             electrons=cfg.system.electrons,
@@ -540,8 +577,15 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
 
     # Construct MCMC step
     atoms_to_mcmc = atoms if cfg.mcmc.scale_by_nuclear_distance else None
-    mcmc_step = mcmc.make_mcmc_step(
-        batch_abs_network,
+    mcmc_step_psi = mcmc.make_mcmc_step(
+        batch_abs_network_psi,
+        device_batch_size,
+        steps=cfg.mcmc.steps,
+        atoms=atoms_to_mcmc,
+        one_electron_moves=cfg.mcmc.one_electron,
+    )
+    mcmc_step_phi = mcmc.make_mcmc_step(
+        batch_abs_network_phi,
         device_batch_size,
         steps=cfg.mcmc.steps,
         atoms=atoms_to_mcmc,
@@ -553,8 +597,17 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
             cfg.system.make_local_energy_fn.rsplit('.', maxsplit=1))
         local_energy_module = importlib.import_module(local_energy_module)
         make_local_energy = getattr(local_energy_module, local_energy_fn)  # type: hamiltonian.MakeLocalEnergy
-        local_energy = make_local_energy(
-            f=network,
+        local_energy_psi = make_local_energy(
+            f=network_psi,
+            atoms=atoms,
+            charges=charges,
+            nspins=nspins,
+            use_scan=False,
+            do_complex=cfg.network.detnet.do_complex,
+            **cfg.system.make_local_energy_kwargs,
+        )
+        local_energy_phi = make_local_energy(
+            f=network_phi,
             atoms=atoms,
             charges=charges,
             nspins=nspins,
@@ -563,8 +616,16 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
             **cfg.system.make_local_energy_kwargs,
         )
     else:
-        local_energy = hamiltonian.local_energy(
-            f=network,
+        local_energy_psi = hamiltonian.local_energy(
+            f=network_psi,
+            atoms=atoms,
+            charges=charges,
+            nspins=nspins,
+            use_scan=False,
+            do_complex=cfg.network.detnet.do_complex,
+        )
+        local_energy_phi = hamiltonian.local_energy(
+            f=network_phi,
             atoms=atoms,
             charges=charges,
             nspins=nspins,
@@ -576,8 +637,10 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
     else:
         my_make_loss = qmc_loss_functions.make_loss
     evaluate_loss = my_make_loss(
-        network,
-        local_energy,
+        network_phi,
+        network_psi,
+        local_energy_phi,
+        local_energy_psi,
         clip_local_energy=cfg.optim.clip_el)
 
     # Compute the learning rate
