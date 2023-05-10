@@ -499,9 +499,7 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
             init_width=cfg.mcmc.init_width)
         data_psi = jnp.reshape(data_psi, data_shape + data_psi.shape[1:])
         data_psi = kfac_jax.utils.broadcast_all_local_devices(data_psi)
-        t_init = 0
-        opt_state_ckpt = None
-        mcmc_width_ckpt = None
+
         # make phi data
         key, subkey = jax.random.split(key)
         subkey = jax.random.fold_in(subkey, jax.process_index())
@@ -596,7 +594,7 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
         local_energy_module, local_energy_fn = (
             cfg.system.make_local_energy_fn.rsplit('.', maxsplit=1))
         local_energy_module = importlib.import_module(local_energy_module)
-        make_local_energy = getattr(local_energy_module, local_energy_fn)  # type: hamiltonian.MakeLocalEnergy
+        make_local_energy = getattr(local_energy_module, local_energy_fn)  # type: hamiltonian.MakeMomentLocalEnergy
         local_energy_psi = make_local_energy(
             f=network_psi,
             atoms=atoms,
@@ -693,14 +691,18 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
         raise ValueError(f'Not a recognized optimizer: {cfg.optim.optimizer}')
 
     if not optimizer:
-        opt_state = None
-        step = make_training_step(
-            mcmc_step=mcmc_step,
+        opt_state_psi = None
+        step_psi = make_training_step(
+            mcmc_step=mcmc_step_psi,
+            optimizer_step=make_loss_step(evaluate_loss))
+        opt_state_phi = None
+        step_phi = make_training_step(
+            mcmc_step=mcmc_step_phi,
             optimizer_step=make_loss_step(evaluate_loss))
     elif isinstance(optimizer, optax.GradientTransformation):
         # optax/optax-compatible optimizer (ADAM, LAMB, ...)
-        opt_state = jax.pmap(optimizer.init)(params)
-        opt_state = opt_state_ckpt or opt_state  # avoid overwriting ckpted state
+        opt_state_psi = jax.pmap(optimizer.init)(params_psi)
+        opt_state_psi = opt_state_ckpt or opt_state_psi  # avoid overwriting ckpted state
         step = make_training_step(
             mcmc_step=mcmc_step,
             optimizer_step=make_opt_update_step(evaluate_loss, optimizer))

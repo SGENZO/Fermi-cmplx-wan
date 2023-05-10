@@ -25,7 +25,7 @@ from jax import numpy as jnp
 
 
 def _harmonic_mean(x, atoms):
-  """Calculates the harmonic mean of each electron distance to the nuclei.
+    """Calculates the harmonic mean of each electron distance to the nuclei.
 
   Args:
     x: electron positions. Shape (batch, nelectrons, 1, ndim). Note the third
@@ -38,13 +38,13 @@ def _harmonic_mean(x, atoms):
     the harmonic mean of the distance of the j-th electron of the i-th MCMC
     configuration to all atoms.
   """
-  ae = x - atoms[None, ...]
-  r_ae = jnp.linalg.norm(ae, axis=-1, keepdims=True)
-  return 1.0 / jnp.mean(1.0 / r_ae, axis=-2, keepdims=True)
+    ae = x - atoms[None, ...]
+    r_ae = jnp.linalg.norm(ae, axis=-1, keepdims=True)
+    return 1.0 / jnp.mean(1.0 / r_ae, axis=-2, keepdims=True)
 
 
 def _log_prob_gaussian(x, mu, sigma):
-  """Calculates the log probability of Gaussian with diagonal covariance.
+    """Calculates the log probability of Gaussian with diagonal covariance.
 
   Args:
     x: Positions. Shape (batch, nelectron, 1, ndim) - as used in mh_update.
@@ -56,9 +56,9 @@ def _log_prob_gaussian(x, mu, sigma):
     Log probability of Gaussian distribution with shape as required for
     mh_update - (batch, nelectron, 1, 1).
   """
-  numer = jnp.sum(-0.5 * ((x - mu)**2) / (sigma**2), axis=[1, 2, 3])
-  denom = x.shape[-1] * jnp.sum(jnp.log(sigma), axis=[1, 2, 3])
-  return numer - denom
+    numer = jnp.sum(-0.5 * ((x - mu) ** 2) / (sigma ** 2), axis=[1, 2, 3])
+    denom = x.shape[-1] * jnp.sum(jnp.log(sigma), axis=[1, 2, 3])
+    return numer - denom
 
 
 def mh_update(params,
@@ -70,12 +70,12 @@ def mh_update(params,
               stddev=0.02,
               atoms=None,
               i=0):
-  """Performs one Metropolis-Hastings step using an all-electron move.
+    """Performs one Metropolis-Hastings step using an all-electron move.
 
   Args:
-    params: Wavefuncttion parameters.
+    params: Wavefunction parameters.
     f: Callable with signature f(params, x) which returns the log of the
-      wavefunction (i.e. the sqaure root of the log probability of x).
+      wavefunction (i.e. the square root of the log probability of x).
     x1: Initial MCMC configurations. Shape (batch, nelectrons*ndim).
     key: RNG state.
     lp_1: log probability of f evaluated at x1 given parameters params.
@@ -95,35 +95,35 @@ def mh_update(params,
       lp: log probability of f evaluated at x.
       num_accepts: update running total of number of accepted MH moves.
   """
-  del i  # electron index ignored for all-electron moves
-  key, subkey = jax.random.split(key)
-  if atoms is None:  # symmetric proposal, same stddev everywhere
-    x2 = x1 + stddev * jax.random.normal(subkey, shape=x1.shape)  # proposal
-    lp_2 = 2. * f(params, x2)  # log prob of proposal
-    ratio = lp_2 - lp_1
-  else:  # asymmetric proposal, stddev propto harmonic mean of nuclear distances
-    n = x1.shape[0]
-    x1 = jnp.reshape(x1, [n, -1, 1, 3])
-    hmean1 = _harmonic_mean(x1, atoms)  # harmonic mean of distances to nuclei
+    del i  # electron index ignored for all-electron moves
+    key, subkey = jax.random.split(key)
+    if atoms is None:  # symmetric proposal, same stddev everywhere
+        x2 = x1 + stddev * jax.random.normal(subkey, shape=x1.shape)  # proposal
+        lp_2 = 2. * f(params, x2)  # log prob of proposal
+        ratio = lp_2 - lp_1
+    else:  # asymmetric proposal, stddev propto harmonic mean of nuclear distances
+        n = x1.shape[0]
+        x1 = jnp.reshape(x1, [n, -1, 1, 3])
+        hmean1 = _harmonic_mean(x1, atoms)  # harmonic mean of distances to nuclei
 
-    x2 = x1 + stddev * hmean1 * jax.random.normal(subkey, shape=x1.shape)
-    lp_2 = 2. * f(params, x2)  # log prob of proposal
-    hmean2 = _harmonic_mean(x2, atoms)  # needed for probability of reverse jump
+        x2 = x1 + stddev * hmean1 * jax.random.normal(subkey, shape=x1.shape)
+        lp_2 = 2. * f(params, x2)  # log prob of proposal
+        hmean2 = _harmonic_mean(x2, atoms)  # needed for probability of reverse jump
 
-    lq_1 = _log_prob_gaussian(x1, x2, stddev * hmean1)  # forward probability
-    lq_2 = _log_prob_gaussian(x2, x1, stddev * hmean2)  # reverse probability
-    ratio = lp_2 + lq_2 - lp_1 - lq_1
+        lq_1 = _log_prob_gaussian(x1, x2, stddev * hmean1)  # forward probability
+        lq_2 = _log_prob_gaussian(x2, x1, stddev * hmean2)  # reverse probability
+        ratio = lp_2 + lq_2 - lp_1 - lq_1
 
-    x1 = jnp.reshape(x1, [n, -1])
-    x2 = jnp.reshape(x2, [n, -1])
-  key, subkey = jax.random.split(key)
-  rnd = jnp.log(jax.random.uniform(subkey, shape=lp_1.shape))
-  cond = ratio > rnd
-  x_new = jnp.where(cond[..., None], x2, x1)
-  lp_new = jnp.where(cond, lp_2, lp_1)
-  num_accepts += jnp.sum(cond)
+        x1 = jnp.reshape(x1, [n, -1])
+        x2 = jnp.reshape(x2, [n, -1])
+    key, subkey = jax.random.split(key)
+    rnd = jnp.log(jax.random.uniform(subkey, shape=lp_1.shape))
+    cond = ratio > rnd
+    x_new = jnp.where(cond[..., None], x2, x1)
+    lp_new = jnp.where(cond, lp_2, lp_1)
+    num_accepts += jnp.sum(cond)
 
-  return x_new, key, lp_new, num_accepts
+    return x_new, key, lp_new, num_accepts
 
 
 def mh_one_electron_update(params,
@@ -135,12 +135,12 @@ def mh_one_electron_update(params,
                            stddev=0.02,
                            atoms=None,
                            i=0):
-  """Performs one Metropolis-Hastings step for a single electron.
+    """Performs one Metropolis-Hastings step for a single electron.
 
   Args:
-    params: Wavefuncttion parameters.
+    params: Wavefunction parameters.
     f: Callable with signature f(params, x) which returns the log of the
-      wavefunction (i.e. the sqaure root of the log probability of x).
+      wavefunction (i.e. the square root of the log probability of x). 这里的说法有点问题，实际上是1/2 log prob
     x1: Initial MCMC configurations. Shape (batch, nelectrons*ndim).
     key: RNG state.
     lp_1: log probability of f evaluated at x1 given parameters params.
@@ -160,30 +160,31 @@ def mh_one_electron_update(params,
   Raises:
     NotImplementedError: if atoms is supplied.
   """
-  key, subkey = jax.random.split(key)
-  n = x1.shape[0]
-  x1 = jnp.reshape(x1, [n, -1, 1, 3])
-  nelec = x1.shape[1]
-  ii = i % nelec
-  if atoms is None:  # symmetric proposal, same stddev everywhere
-    x2 = x1.at[:, ii].add(stddev *
-                          jax.random.normal(subkey, shape=x1[:, ii].shape))
-    lp_2 = 2. * f(params, x2)  # log prob of proposal
-    ratio = lp_2 - lp_1
-  else:  # asymmetric proposal, stddev propto harmonic mean of nuclear distances
-    raise NotImplementedError('Still need to work out reverse probabilities '
-                              'for asymmetric moves.')
+    key, subkey = jax.random.split(key)
+    n = x1.shape[0]  # number of batch
+    x1 = jnp.reshape(x1, [n, -1, 1, 3])  # -1是unspecified value, 只需要指定其他值，这个是多少无所谓。这里是nelectron
+    nelec = x1.shape[1]
+    ii = i % nelec  # 这似乎意味着i是一直变大的
+    if atoms is None:  # symmetric proposal, same stddev everywhere
+        x2 = x1.at[:, ii].add(stddev *
+                              jax.random.normal(subkey, shape=x1[:, ii].shape))
+        lp_2 = 2. * f(params, x2)  # log prob of proposal
+        ratio = lp_2 - lp_1     # (batch, 1)
+    else:  # asymmetric proposal, stddev propto harmonic mean of nuclear distances
+        raise NotImplementedError('Still need to work out reverse probabilities '
+                                  'for asymmetric moves.')
 
-  x1 = jnp.reshape(x1, [n, -1])
-  x2 = jnp.reshape(x2, [n, -1])
-  key, subkey = jax.random.split(key)
-  rnd = jnp.log(jax.random.uniform(subkey, shape=lp_1.shape))
-  cond = ratio > rnd
-  x_new = jnp.where(cond[..., None], x2, x1)
-  lp_new = jnp.where(cond, lp_2, lp_1)
-  num_accepts += jnp.sum(cond)
+    x1 = jnp.reshape(x1, [n, -1])
+    x2 = jnp.reshape(x2, [n, -1])
+    key, subkey = jax.random.split(key)
+    rnd = jnp.log(jax.random.uniform(subkey, shape=lp_1.shape))
+    cond = ratio > rnd  # 一个是True或False的array (batch, 1)
+    # 这里ratio没有做和log(1) = 0的比较，算是MH算法吗？因为是取min，如果小于1的话一定会小于ratio
+    x_new = jnp.where(cond[..., None], x2, x1)  # Ture就选x2，False就选x1
+    lp_new = jnp.where(cond, lp_2, lp_1)
+    num_accepts += jnp.sum(cond)  # 这个为什么一直累加？看看后面返回的num_accepts有什么作用
 
-  return x_new, key, lp_new, num_accepts
+    return x_new, key, lp_new, num_accepts
 
 
 def make_mcmc_step(batch_network,
@@ -191,7 +192,7 @@ def make_mcmc_step(batch_network,
                    steps=10,
                    atoms=None,
                    one_electron_moves=False):
-  """Creates the MCMC step function.
+    """Creates the MCMC step function.
 
   Args:
     batch_network: function, signature (params, x), which evaluates the log of
@@ -209,11 +210,11 @@ def make_mcmc_step(batch_network,
   Returns:
     Callable which performs the set of MCMC steps.
   """
-  inner_fun = mh_one_electron_update if one_electron_moves else mh_update
+    inner_fun = mh_one_electron_update if one_electron_moves else mh_update
 
-  @jax.jit
-  def mcmc_step(params, data, key, width):
-    """Performs a set of MCMC steps.
+    @jax.jit
+    def mcmc_step(params, data, key, width):
+        """Performs a set of MCMC steps.
 
     Args:
       params: parameters to pass to the network.
@@ -226,17 +227,24 @@ def make_mcmc_step(batch_network,
       updated RNG state and pmove the average probability a move was accepted.
     """
 
-    def step_fn(i, x):
-      return inner_fun(
-          params, batch_network, *x, stddev=width, atoms=atoms, i=i)
+        def step_fn(i, x):
+            return inner_fun(
+                params, batch_network, *x, stddev=width, atoms=atoms, i=i)
 
-    nelec = data.shape[-1] // 3
-    nsteps = nelec * steps if one_electron_moves else steps
-    logprob = 2. * batch_network(params, data)
-    data, key, _, num_accepts = lax.fori_loop(0, nsteps, step_fn,
-                                              (data, key, logprob, 0.))
-    pmove = jnp.sum(num_accepts) / (nsteps * batch_per_device)
-    pmove = constants.pmean(pmove)
-    return data, pmove
+        nelec = data.shape[-1] // 3
+        nsteps = nelec * steps if one_electron_moves else steps
+        logprob = 2. * batch_network(params, data)
+        data, key, _, num_accepts = lax.fori_loop(0, nsteps, step_fn,
+                                                  (data, key, logprob, 0.))
+        """
+        def fori_loop(lower, upper, body_fun, init_val):
+        val = init_val
+        for i in range(lower, upper):
+        val = body_fun(i, val)
+        return val
+        """
+        pmove = jnp.sum(num_accepts) / (nsteps * batch_per_device)
+        pmove = constants.pmean(pmove)  # 这里num_accepts的维度是？
+        return data, pmove
 
-  return mcmc_step
+    return mcmc_step
