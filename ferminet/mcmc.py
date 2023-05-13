@@ -46,6 +46,8 @@ def _harmonic_mean(x, atoms):
 def _log_prob_gaussian(x, mu, sigma):
     """Calculates the log probability of Gaussian with diagonal covariance.
 
+    没太看懂这个的gaussian log prob的做法，反正是用来做条件转移概率的
+
   Args:
     x: Positions. Shape (batch, nelectron, 1, ndim) - as used in mh_update.
     mu: means of Gaussian distribution. Same shape as or broadcastable to x.
@@ -56,7 +58,7 @@ def _log_prob_gaussian(x, mu, sigma):
     Log probability of Gaussian distribution with shape as required for
     mh_update - (batch, nelectron, 1, 1).
   """
-    numer = jnp.sum(-0.5 * ((x - mu) ** 2) / (sigma ** 2), axis=[1, 2, 3])
+    numer = jnp.sum(-0.5 * ((x - mu) ** 2) / (sigma ** 2), axis=[1, 2, 3])  # 按batch求和
     denom = x.shape[-1] * jnp.sum(jnp.log(sigma), axis=[1, 2, 3])
     return numer - denom
 
@@ -231,7 +233,7 @@ def make_mcmc_step(batch_network,
             return inner_fun(
                 params, batch_network, *x, stddev=width, atoms=atoms, i=i)
 
-        nelec = data.shape[-1] // 3
+        nelec = data.shape[-1] // 3  # (batch, nelec * ndim) 这里3是ndim
         nsteps = nelec * steps if one_electron_moves else steps
         logprob = 2. * batch_network(params, data)
         data, key, _, num_accepts = lax.fori_loop(0, nsteps, step_fn,
